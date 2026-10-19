@@ -1,0 +1,895 @@
+#!/bin/zsh
+# Double Claude (double-claude): due account Claude sullo stesso Mac, senza che si mescolino.
+#
+# Separa i due profili su quattro livelli:
+#   1. account       login dal browser, uno alla volta
+#   2. app Desktop   una seconda copia dell'app con --user-data-dir
+#   3. Claude Code   una config propria con CLAUDE_CONFIG_DIR (anche nella scheda Code dell'app)
+#   4. cartelle      zone nel Terminale e divieti Read/Edit
+#
+# Uso rapido:  double-claude init  →  double-claude doctor  →  double-claude apply
+# Licenza: MIT. Nessun dato lascia il Mac.
+
+emulate -R zsh
+setopt extended_glob null_glob pipe_fail
+# A è sempre ~/.claude: se double-claude parte da una sessione di B (per esempio la scheda Code dell'app di B),
+# CLAUDE_CONFIG_DIR ereditata manderebbe a B i comandi pensati per A.
+unset CLAUDE_CONFIG_DIR
+
+DC_VERSION=1.1.0
+DC_HOME_CFG=${DC_CONFIG_HOME:-$HOME/.config/double-claude}
+DC_CONF=$DC_HOME_CFG/config
+SELF=${0:A}
+DC_YES=0
+DC_TODO=0
+
+# ---------------------------------------------------------------- aspetto
+if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+  _b=$'\e[1m' _d=$'\e[2m' _r=$'\e[0m' _g=$'\e[32m' _y=$'\e[33m' _red=$'\e[31m' _a=$'\e[34m' _o=$'\e[33m'
+else
+  _b= _d= _r= _g= _y= _red= _a= _o=
+fi
+say()  { print -r -- "$*"; }
+h1()   { print; print -r -- "${_b}$*${_r}"; }
+h2()   { print; print -r -- "${_b}$*${_r}"; }
+ok()   { print -r -- "  ${_g}✓${_r} $*"; }
+ko()   { print -r -- "  ${_red}✗${_r} $*"; DC_TODO=$(( DC_TODO + 1 )); return 0; }
+warn() { print -r -- "  ${_y}!${_r} $*"; }
+hint() { print -r -- "    ${_d}→ $*${_r}"; }
+die()  { print -u2 -r -- "${_red}errore:${_r} $*"; exit 1; }
+
+ask() { # ask VAR "domanda" [predefinito]
+  local __v=$1 __q=$2 __d=${3:-} __x=''
+  if (( DC_YES )); then __x=$__d
+  else read -r "__x?  $__q${__d:+ ${_d}[$__d]${_r}}: " || __x=''; [[ -t 0 ]] || print -r -- "  $__q: ${__x:-$__d}"; fi
+  [[ -z $__x ]] && __x=$__d
+  typeset -g "$__v=$__x"
+}
+confirm() { # confirm "domanda" [S|N]
+  local d=${2:-S} x=''
+  (( DC_YES )) && [[ $d == S ]] && return 0
+  (( DC_YES )) && return 1
+  read -r "x?  $1 ${_d}[$([[ $d == S ]] && print S/n || print s/N)]${_r} " || x=''
+  x=${x:-$d}
+  [[ -t 0 ]] || print -r -- "  $1 ${x}"
+  [[ $x == [SsYy]* ]]
+}
+
+# ---------------------------------------------------------------- percorsi
+expand() { local p=${1/#\~/$HOME}; p=${p%%/##}; [[ $p != /* ]] && p=$HOME/$p; print -r -- "$p"; }
+tilde()  { local p=$1; [[ $p == $HOME ]] && p='~'; [[ $p == $HOME/* ]] && p="~/${p#$HOME/}"; print -r -- "$p"; }
+rule_of(){ local p=$1; if [[ $p == $HOME/* ]]; then print -r -- "~/${p#$HOME/}"; else print -r -- "/$p"; fi; }
+
+# ---------------------------------------------------------------- configurazione
+defaults() {
+  DC_START=two
+  DC_A_LABEL=work
+  DC_B_LABEL=personal
+  DC_A_APP=Claude
+  DC_ZONE_OWNER=none       # a | b | none  (le zone sono facoltative)
+  DC_ZONE_DIRS=()
+  DC_MCP_MOVE=()
+  DC_A_DENY_EXTRA=()
+  DC_B_DENY_EXTRA=()
+  DC_MODULES=(shell move mcp deny app)
+  DC_LAUNCHER_HIDE=0       # 1 = launcher fuori dal Dock (LSUIElement), ma non si possono fissare
+  DC_APP_SRC=${DC_APP:-/Applications/Claude.app}
+  unset DC_B_CMD DC_B_APP DC_B_CFG DC_B_DATA DC_CLONE
+}
+derive() {
+  : ${DC_B_CMD:=claude-$DC_B_LABEL}
+  : "${DC_B_APP:=Claude ${(C)DC_B_LABEL}}"
+  : "${DC_B_CFG:=$HOME/.$DC_B_CMD}"
+  : "${DC_B_DATA:=$HOME/Library/Application Support/${DC_B_APP// /-}}"
+  : "${DC_CLONE:=$HOME/Library/Application Support/$DC_B_CMD-app.noindex/$DC_B_APP.app}"
+  DC_A_CFG=$HOME/.claude
+  DC_A_JSON=$HOME/.claude.json
+  DC_A_DATA="$HOME/Library/Application Support/Claude"
+  DC_B_3P="$DC_B_DATA-3p"
+  CLAUDE_BIN=$(whence -p claude 2>/dev/null)
+}
+load() { defaults; [[ -f $DC_CONF ]] && source "$DC_CONF"; derive; }
+need_conf() { [[ -f $DC_CONF ]] || die "nessuna configurazione. Lancia prima: double-claude init"; }
+has_mod() { (( ${DC_MODULES[(Ie)$1]} )); }
+is_mac()  { [[ $OSTYPE == darwin* || -n ${DC_FAKE_MAC:-} ]]; }
+
+save_conf() {
+  mkdir -p "$DC_HOME_CFG"
+  {
+    print "# double-claude: configurazione. Generata da 'double-claude init', puoi modificarla a mano."
+    print -r "DC_START=${(q)DC_START}            # one | two | split"
+    print -r "DC_A_LABEL=${(q)DC_A_LABEL}"
+    print -r "DC_B_LABEL=${(q)DC_B_LABEL}"
+    print -r "DC_A_APP=${(q)DC_A_APP}"
+    print -r "DC_B_APP=${(q)DC_B_APP}"
+    print -r "DC_B_CMD=${(q)DC_B_CMD}"
+    print -r "DC_B_CFG=${(q)DC_B_CFG}"
+    print -r "DC_ZONE_OWNER=${(q)DC_ZONE_OWNER}         # a | b | none"
+    print -r "DC_ZONE_DIRS=(${(@q)DC_ZONE_DIRS})"
+    print -r "DC_MCP_MOVE=(${(@q)DC_MCP_MOVE})"
+    print -r "DC_A_DENY_EXTRA=(${(@q)DC_A_DENY_EXTRA})"
+    print -r "DC_B_DENY_EXTRA=(${(@q)DC_B_DENY_EXTRA})"
+    print -r "DC_MODULES=(${(@q)DC_MODULES})"
+    print -r "DC_LAUNCHER_HIDE=${(q)DC_LAUNCHER_HIDE}       # 1 = launcher fuori dal Dock"
+  } > "$DC_CONF"
+}
+
+# ---------------------------------------------------------------- motore JSON
+# Il motore è JavaScript: su macOS gira con JXA (osascript), nei test con node.
+engine() { # engine COMANDO   (input dalle variabili DC_*)
+  local src; src=$(engine_src)
+  local -x DC_CMD=$1 DC_ZONE=${(pj:\n:)DC_ZONE_DIRS} DC_OWNER=$DC_ZONE_OWNER DC_BCFG=$DC_B_CFG
+  local -x DC_ADATA=$DC_A_DATA DC_BDATA=$DC_B_DATA DC_B3P=$DC_B_3P
+  if [[ ${DC_JS_RUNTIME:-} == node ]]; then node - <<< "$src"
+  else osascript -l JavaScript <<< "$src"; fi
+}
+engine_src() { cat <<'JS'
+var IS_JXA = (typeof ObjC !== 'undefined');
+var io = IS_JXA ? (function () {
+  ObjC.import('Foundation');
+  var fm = $.NSFileManager.defaultManager;
+  var env = ObjC.deepUnwrap($.NSProcessInfo.processInfo.environment) || {};
+  return {
+    env: function (k) { return env[k] || ''; },
+    exists: function (p) { return fm.fileExistsAtPath(p); },
+    isDir: function (p) { var r = Ref(); return fm.fileExistsAtPathIsDirectory(p, r) && r[0]; },
+    read: function (p) { if (!fm.fileExistsAtPath(p)) return ''; return ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(p, 4, null)) || ''; },
+    write: function (p, s) { return $(s).writeToFileAtomicallyEncodingError(p, true, 4, null); },
+    ls: function (p) { var a = ObjC.deepUnwrap(fm.contentsOfDirectoryAtPathError(p, null)); return Array.isArray(a) ? a : []; },
+    mkdirp: function (p) { return fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(p, true, $(), null); },
+    mv: function (a, b) { return fm.moveItemAtPathToPathError(a, b, null); },
+    cp: function (a, b) { return fm.copyItemAtPathToPathError(a, b, null); },
+    rmEmpty: function (p) { var a = ObjC.deepUnwrap(fm.contentsOfDirectoryAtPathError(p, null)); if (Array.isArray(a) && a.length === 0) fm.removeItemAtPathError(p, null); },
+    uuid: function () { return ObjC.unwrap($.NSUUID.UUID.UUIDString); }
+  };
+})() : (function () {
+  var fs = require('fs');
+  return {
+    env: function (k) { return process.env[k] || ''; },
+    exists: function (p) { return fs.existsSync(p); },
+    isDir: function (p) { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } },
+    read: function (p) { return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : ''; },
+    write: function (p, s) { fs.writeFileSync(p + '.tmp', s); fs.renameSync(p + '.tmp', p); return true; },
+    ls: function (p) { try { return fs.readdirSync(p); } catch (e) { return []; } },
+    mkdirp: function (p) { fs.mkdirSync(p, { recursive: true }); return true; },
+    mv: function (a, b) { try { fs.renameSync(a, b); return true; } catch (e) { return false; } },
+    cp: function (a, b) { try { fs.copyFileSync(a, b); return true; } catch (e) { return false; } },
+    rmEmpty: function (p) { try { fs.rmdirSync(p); } catch (e) {} },
+    uuid: function () { return require('crypto').randomUUID().toUpperCase(); }
+  };
+})();
+
+function main() {
+  var HOME = io.env('HOME'), cmd = io.env('DC_CMD');
+  var A = HOME + '/.claude', AJ = HOME + '/.claude.json', B = io.env('DC_BCFG'), BJ = B + '/.claude.json';
+  var zone = io.env('DC_ZONE').split('\n').filter(Boolean), owner = io.env('DC_OWNER') || 'none';
+  var enc = function (p) { return p.replace(/[^A-Za-z0-9]/g, '-'); };
+  var inZone = function (p) { return zone.some(function (z) { return p === z || p.indexOf(z + '/') === 0; }); };
+  var nameInZone = function (n) { return zone.some(function (z) { var e = enc(z); return n === e || n.indexOf(e + '-') === 0; }); };
+  var pathToB = function (p) { return owner === 'a' ? !inZone(p) : owner === 'b' ? inZone(p) : false; };
+  var nameToB = function (n) { return owner === 'a' ? !nameInZone(n) : owner === 'b' ? nameInZone(n) : false; };
+  var tilde = function (p) { return p === HOME ? '~' : p.indexOf(HOME + '/') === 0 ? '~' + p.slice(HOME.length) : p; };
+  var json = function (p) { var t = io.read(p); if (!t.trim()) return null; try { return JSON.parse(t); } catch (e) { return undefined; } };
+  var lines = function (s) { return s.split('\n').filter(function (l) { return l.trim(); }); };
+
+  // La cartella di una chat dice dove è stata aperta: il campo cwd nei suoi .jsonl è la fonte più precisa.
+  function chatCwd(dir) {
+    var files = io.ls(dir).filter(function (f) { return /\.jsonl$/.test(f); });
+    for (var i = 0; i < files.length; i++) {
+      var m = io.read(dir + '/' + files[i]).match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (m) { try { return JSON.parse('"' + m[1] + '"'); } catch (e) {} }
+    }
+    return '';
+  }
+  function classify() {
+    var r = { chats: [], move: [], keep: [], reg: [], ja: json(AJ) };
+    io.ls(A + '/projects').forEach(function (n) {
+      var d = A + '/projects/' + n;
+      if (!io.isDir(d)) return;
+      var cwd = chatCwd(d);
+      if (cwd ? pathToB(cwd) : nameToB(n)) r.chats.push({ name: n, cwd: cwd });
+    });
+    lines(io.read(A + '/history.jsonl')).forEach(function (l) {
+      var p = ''; try { p = JSON.parse(l).project || ''; } catch (e) {}
+      (p && pathToB(p) ? r.move : r.keep).push(l);
+    });
+    if (r.ja && r.ja.projects) r.reg = Object.keys(r.ja.projects).filter(pathToB);
+    return r;
+  }
+  // Blocco degli aggiornamenti: Claude legge una policy locale da <dati>-3p/configLibrary.
+  // La cartella -3p serve anche alle configurazioni di inferenza (Bedrock, Vertex...): se non l'abbiamo creata noi, non si tocca.
+  var P3 = io.env('DC_B3P'), LIB = P3 + '/configLibrary', MARK = P3 + '/.double-claude';
+  function updates() {
+    if (!io.exists(P3)) return 'none';
+    var meta = json(LIB + '/_meta.json'), id = meta && meta.appliedId, pol = id ? json(LIB + '/' + id + '.json') : null;
+    return pol && pol.disableAutoUpdates === true ? 'off' : 'on';
+  }
+  function appAccount(dir) { var j = json(dir + '/config.json'); return (j && j.lastKnownAccountUuid) || ''; }
+
+  function denyOf(p) { var j = json(p); return (j && j.permissions && j.permissions.deny) || []; }
+
+  if (cmd === 'scan') {
+    var ja = json(AJ), jb = json(BJ), r = owner === 'none' ? { chats: [], move: [], reg: [] } : classify();
+    var email = function (j) { return (j && j.oauthAccount && j.oauthAccount.emailAddress) || ''; };
+    return [
+      'json_a=' + (ja === undefined ? 'broken' : ja ? 'ok' : 'missing'),
+      'json_b=' + (jb === undefined ? 'broken' : jb ? 'ok' : 'missing'),
+      'account_a=' + email(ja), 'account_b=' + email(jb),
+      'mcp_a=' + Object.keys((ja && ja.mcpServers) || {}).join(' '),
+      'mcp_b=' + Object.keys((jb && jb.mcpServers) || {}).join(' '),
+      'chats_b=' + r.chats.length, 'history_b=' + r.move.length, 'registry_b=' + r.reg.length,
+      'updates_b=' + updates(), 'updates_ours=' + (io.exists(MARK) ? 1 : 0),
+      'app_same=' + (function (a, b) { return a && a === b ? 1 : 0; })(appAccount(io.env('DC_ADATA')), appAccount(io.env('DC_BDATA')))
+    ].join('\n');
+  }
+
+  if (cmd === 'policy-set') {
+    if (io.exists(P3) && !io.exists(MARK)) return 'foreign';
+    var meta = json(LIB + '/_meta.json'), id = (meta && meta.appliedId) || io.uuid();
+    io.mkdirp(LIB);
+    io.write(LIB + '/_meta.json', JSON.stringify({ appliedId: id, entries: [{ id: id, name: 'Default' }] }, null, 2));
+    io.write(LIB + '/' + id + '.json', JSON.stringify({ disableAutoUpdates: true }, null, 2));
+    io.write(MARK, 'Creata da double-claude: blocca l\'aggiornamento automatico della copia dell\'app.\n');
+    return 'ours';
+  }
+
+  if (cmd === 'move') {
+    var dry = io.env('DC_DRY') !== '0', m = classify(), out = [];
+    if (m.ja === undefined) return 'ERRORE: ~/.claude.json non è un JSON valido. Non tocco niente.';
+    out.push(dry ? 'Prova: non cambia niente.' : 'Sposto in ' + tilde(B) + ':');
+    m.chats.forEach(function (c) {
+      out.push('  chat        ' + (c.cwd ? tilde(c.cwd) : c.name));
+      if (dry) return;
+      var src = A + '/projects/' + c.name, dst = B + '/projects/' + c.name;
+      io.ls(src).forEach(function (f) {
+        var id = f.replace(/\.jsonl$/, '');
+        if (id !== f) {
+          ['file-history', 'session-env'].forEach(function (sub) {
+            if (io.exists(A + '/' + sub + '/' + id) && !io.exists(B + '/' + sub + '/' + id)) { io.mkdirp(B + '/' + sub); io.mv(A + '/' + sub + '/' + id, B + '/' + sub + '/' + id); }
+          });
+          io.ls(A + '/todos').forEach(function (t) { if (t.indexOf(id) === 0 && !io.exists(B + '/todos/' + t)) { io.mkdirp(B + '/todos'); io.mv(A + '/todos/' + t, B + '/todos/' + t); } });
+        }
+      });
+      if (!io.exists(dst)) { io.mkdirp(B + '/projects'); if (!io.mv(src, dst)) out.push('    ! non spostata'); return; }
+      io.ls(src).forEach(function (f) { if (!io.exists(dst + '/' + f)) io.mv(src + '/' + f, dst + '/' + f); });
+      io.rmEmpty(src);
+      if (io.exists(src)) out.push('    ! alcuni file esistono già in B e sono rimasti in A');
+    });
+    out.push('  cronologia  ' + m.move.length + ' righe passano a B, ' + m.keep.length + ' restano in A');
+    m.reg.forEach(function (k) { out.push('  registro    ' + tilde(k)); });
+    if (!dry) {
+      if (m.move.length) {
+        io.mkdirp(B);
+        var old = io.read(B + '/history.jsonl'); if (old && old.slice(-1) !== '\n') old += '\n';
+        io.write(B + '/history.jsonl', old + m.move.join('\n') + '\n');
+        io.write(A + '/history.jsonl', m.keep.length ? m.keep.join('\n') + '\n' : '');
+      }
+      if (m.reg.length) { m.reg.forEach(function (k) { delete m.ja.projects[k]; }); io.write(AJ, JSON.stringify(m.ja, null, 2)); }
+    }
+    out.push('', (dry ? 'Da spostare: ' : 'Spostati: ') + m.chats.length + ' chat, ' + m.move.length + ' righe di cronologia, ' + m.reg.length + ' voci di registro.');
+    return out.join('\n');
+  }
+
+  if (cmd === 'mcp-get') {
+    var j = json(AJ), s = j && j.mcpServers && j.mcpServers[io.env('DC_ARG')];
+    return s ? JSON.stringify(s) : '';
+  }
+
+  if (cmd === 'deny-missing' || cmd === 'deny') {
+    var file = io.env('DC_FILE'), rules = lines(io.env('DC_RULES'));
+    var cur = json(file);
+    if (cur === undefined) return 'ERRORE: ' + tilde(file) + ' non è un JSON valido.';
+    var have = denyOf(file), miss = rules.filter(function (x) { return have.indexOf(x) < 0; });
+    if (cmd === 'deny-missing') return String(miss.length);
+    cur = cur || {};
+    if (io.exists(file) && !io.exists(file + '.bak')) io.cp(file, file + '.bak');
+    cur.permissions = cur.permissions || {};
+    cur.permissions.deny = have.concat(miss);
+    io.mkdirp(file.replace(/\/[^\/]*$/, ''));
+    io.write(file, JSON.stringify(cur, null, 2));
+    return String(miss.length);
+  }
+  return 'comando sconosciuto: ' + cmd;
+}
+function run() { return main(); }
+if (!IS_JXA) { var __o = main(); if (__o) process.stdout.write(__o + '\n'); }
+JS
+}
+
+scan() { # riempie l'array associativo S
+  typeset -gA S; S=()
+  local k v
+  while IFS='=' read -r k v; do [[ -n $k ]] && S[$k]=$v; done < <(engine scan 2>/dev/null)
+  [[ -n ${S[json_a]:-} ]] || die "non riesco a leggere le configurazioni (osascript non risponde)."
+}
+
+# ---------------------------------------------------------------- regole dei divieti
+rw()  { local r; r=$(rule_of "$1"); print -r -- "Read($r/**)"; print -r -- "Edit($r/**)"; }
+rwf() { local r; r=$(rule_of "$1"); print -r -- "Read($r)"; print -r -- "Edit($r)"; }
+rules_a() { # cosa A non deve toccare
+  rw "$DC_B_CFG"; rw "$DC_B_DATA"
+  [[ $DC_ZONE_OWNER == b ]] && for d in $DC_ZONE_DIRS; do rw "$d"; done
+  for d in $DC_A_DENY_EXTRA; do rw "$d"; done
+}
+rules_b() { # cosa B non deve toccare
+  rw "$DC_A_CFG"; rwf "$DC_A_JSON"; rw "$DC_A_DATA"
+  [[ $DC_ZONE_OWNER == a ]] && for d in $DC_ZONE_DIRS; do rw "$d"; done
+  for d in $DC_B_DENY_EXTRA; do rw "$d"; done
+}
+deny_missing() { DC_FILE=$1 DC_RULES=$2 engine deny-missing 2>/dev/null; }
+
+# ---------------------------------------------------------------- blocco per ~/.zshrc
+zsh_block() {
+  local B=$DC_B_CMD cfg=${(qq)DC_B_CFG}
+  print -r -- "# >>> double-claude >>>"
+  print -r -- "# Generato da double-claude. Per cambiarlo: double-claude init && double-claude apply shell"
+  if [[ $DC_ZONE_OWNER == none ]]; then
+    print -r -- "$B() { CLAUDE_CONFIG_DIR=$cfg command claude \"\$@\"; }"
+  else
+    local in_fn out_fn in_lbl
+    if [[ $DC_ZONE_OWNER == a ]]; then in_fn=claude out_fn=$B in_lbl=$DC_A_LABEL
+    else in_fn=$B out_fn=claude in_lbl=$DC_B_LABEL; fi
+    print -r -- "_dc_dirs=(${(@qq)DC_ZONE_DIRS})"
+    print -r -- '_dc_admin() { case "$1" in mcp|plugin|plugins|config|update|doctor|install|setup-token|-v|--version|-h|--help) return 0;; esac; return 1; }'
+    print -r -- '_dc_in() { local d; for d in "${_dc_dirs[@]}"; do [[ "$PWD/" == "$d/"* ]] && return 0; done; return 1; }'
+    local fn body
+    for fn in claude $B; do
+      [[ $fn == claude ]] && body='command claude "$@"' || body="CLAUDE_CONFIG_DIR=$cfg command claude \"\$@\""
+      print -r -- "$fn() {"
+      if [[ $fn == $in_fn ]]; then
+        print -r -- "  if ! _dc_admin \"\$1\" && ! _dc_in; then print -u2 \"$fn: questa cartella è fuori dalla zona $in_lbl. Qui usa $out_fn.\"; return 1; fi"
+      else
+        print -r -- "  if ! _dc_admin \"\$1\" && _dc_in; then print -u2 \"$fn: questa cartella è nella zona $in_lbl. Qui usa $in_fn.\"; return 1; fi"
+      fi
+      print -r -- "  $body"
+      print -r -- "}"
+    done
+  fi
+  print -r -- "# <<< double-claude <<<"
+}
+strip_block() { # toglie il blocco double-claude da un file
+  [[ -f $1 ]] || return 0
+  awk '$0=="# >>> double-claude >>>"{s=1;next} $0=="# <<< double-claude <<<"{s=0;next} !s' "$1" > "$1.dc-tmp" && cat "$1.dc-tmp" > "$1" && rm -f "$1.dc-tmp"
+}
+
+# ---------------------------------------------------------------- processi e app
+running() { # elenco breve dei Claude aperti: app e Terminale
+  [[ -n ${DC_SKIP_RUNNING_CHECK:-} ]] && return 0
+  ps -A -o pid= -o command= 2>/dev/null | grep -v -e grep -e double-claude | awk '
+    /\.app\/Contents\/MacOS\/Claude$/ || /\.app\/Contents\/MacOS\/Claude --/ { print "app Claude (pid " $1 ")"; next }
+    $2 == "claude" || $2 ~ /\/claude$/ { print "claude nel Terminale (pid " $1 ")" }'
+}
+mains()   { ps -A -o pid= -o command= 2>/dev/null | grep -F -- "$1/Contents/MacOS/Claude" | grep -v -e grep -e 'Claude Helper' | sed 's/^ *//'; }
+strays()  { mains "$DC_CLONE" | grep -v -- '--user-data-dir=' | awk '{print $1}'; }   # la copia aperta senza il suo profilo
+focus()   { osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $1) to true" >/dev/null 2>&1; }
+dialog()  { # dialog "messaggio" "pulsante sì": vero se l'utente sceglie il pulsante
+  local r; r=$(osascript -e 'on run argv' -e 'display dialog (item 1 of argv) buttons {"Lascia così", item 2 of argv} default button 2 with title "double-claude" with icon caution' -e 'return button returned of result' -e 'end run' "$1" "$2" 2>/dev/null)
+  [[ $r == $2 ]]
+}
+quit_pids() { # chiude le app con NSRunningApplication e aspetta fino a 15 secondi
+  osascript -l JavaScript -e 'function run(a){ObjC.import("AppKit");a.forEach(function(p){var x=$.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(p));if(x&&!x.isNil())x.terminate;});}' "$@" >/dev/null 2>&1
+  local i p alive
+  for i in {1..30}; do
+    alive=0; for p in "$@"; do kill -0 "$p" 2>/dev/null && alive=1; done
+    (( alive )) || return 0
+    sleep 0.5
+  done
+  return 1
+}
+dock_has_clone() { command defaults read com.apple.dock persistent-apps 2>/dev/null | grep -qF -- "${DC_CLONE:h:t}"; }
+lsreg() {
+  local x=${DC_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}
+  [[ -x $x ]] && "$x" -f "$1" >/dev/null 2>&1; return 0
+}
+
+# Versioni: la copia si rifà solo se è più vecchia dell'app. Se è più nuova (si è aggiornata da sola) o illeggibile, resta.
+appver() {
+  local f=$1/Contents/Info.plist
+  if whence -p plutil >/dev/null; then plutil -extract CFBundleShortVersionString raw -o - "$f" 2>/dev/null
+  else awk '/<key>CFBundleShortVersionString<\/key>/{getline; gsub(/.*<string>|<\/string>.*/,""); print; exit}' "$f" 2>/dev/null; fi
+}
+vercmp() { # vercmp COPIA SORGENTE → behind | same | ahead | unknown
+  [[ $1 == [0-9]##(.[0-9]##)# && $2 == [0-9]##(.[0-9]##)# ]] || { print unknown; return; }
+  local -a a=(${(s:.:)1}) b=(${(s:.:)2}); local i n=$(( $#a > $#b ? $#a : $#b ))
+  for (( i = 1; i <= n; i++ )); do
+    (( ${a[i]:-0} < ${b[i]:-0} )) && { print behind; return; }
+    (( ${a[i]:-0} > ${b[i]:-0} )) && { print ahead; return; }
+  done
+  print same
+}
+clone_state() { [[ -d $DC_CLONE ]] || { print missing; return; }; vercmp "$(appver "$DC_CLONE")" "$(appver "$DC_APP_SRC")"; }
+clone_recover() { # resti di una ricostruzione interrotta
+  local R=$DC_CLONE.refreshing P=$DC_CLONE.previous
+  if [[ -d $P ]]; then if [[ -d $DC_CLONE ]]; then rm -rf "$P"; else mv "$P" "$DC_CLONE"; fi; fi
+  [[ -e $R ]] && rm -rf "$R"
+  return 0
+}
+CLONE_DID=''
+build_clone() { # la copia nuova nasce accanto e prende il posto della vecchia solo quando è completa
+  clone_recover
+  CLONE_DID=$(clone_state)
+  [[ $CLONE_DID == (missing|behind) ]] || return 0
+  local R=$DC_CLONE.refreshing P=$DC_CLONE.previous
+  mkdir -p "${DC_CLONE:h}"
+  cp -cR "$DC_APP_SRC" "$R" 2>/dev/null || { rm -rf "$R"; cp -R "$DC_APP_SRC" "$R"; } || { rm -rf "$R"; return 1; }
+  [[ -f $R/Contents/Info.plist ]] || { rm -rf "$R"; return 1; }
+  if [[ -d $DC_CLONE ]]; then mv "$DC_CLONE" "$P" || { rm -rf "$R"; return 1; }; fi
+  if ! mv "$R" "$DC_CLONE"; then [[ -d $P ]] && mv "$P" "$DC_CLONE"; return 1; fi
+  rm -rf "$P"
+  lsreg "$DC_CLONE"
+}
+block_updates() { [[ -d $DC_B_3P && ! -f $DC_B_3P/.double-claude ]] && { print foreign; return; }; engine policy-set 2>/dev/null; }
+
+open_a() {
+  local p; p=$(mains "$DC_APP_SRC" | grep -v -- '--user-data-dir=' | awk 'NR==1{print $1}')
+  [[ -n $p ]] && { focus "$p"; return; }
+  open -n -a "$DC_APP_SRC"
+}
+open_b() {
+  local p; p=$(mains "$DC_CLONE" | grep -F -- "--user-data-dir=$DC_B_DATA" | awk 'NR==1{print $1}')
+  [[ -n $p ]] && { focus "$p"; return; }
+  local -a bad=(${(f)"$(strays)"})
+  if (( $#bad )); then
+    if ! dialog "$DC_B_APP è già aperta, ma senza il suo profilo: mostra l'account $DC_A_LABEL. La chiudo e la riapro con l'account $DC_B_LABEL?" "Riapri"; then
+      focus "$bad[1]"; return 0
+    fi
+    quit_pids $bad || { dialog "$DC_B_APP non si chiude. Chiudila con ⌘Q, poi riaprila da qui." "OK"; return 1; }
+  fi
+  build_clone || return 1
+  [[ -d $DC_B_3P ]] || block_updates >/dev/null
+  open -n -a "$DC_CLONE" --env CLAUDE_CONFIG_DIR="$DC_B_CFG" --args "--user-data-dir=$DC_B_DATA"
+}
+mk_launcher() { # mk_launcher "Nome app" a|b
+  local L="$HOME/Applications/$1.app" lbl icns
+  [[ $2 == a ]] && lbl=$DC_A_LABEL || lbl=$DC_B_LABEL
+  mkdir -p "$HOME/Applications"
+  if [[ -e $L ]]; then mkdir -p "$BK/launcher"; mv "$L" "$BK/launcher/"; fi
+  # Senza & il launcher aspetta: da macOS 27 i processi lanciati da un'app chiusa vengono interrotti.
+  osacompile -o "$L" -e "do shell script \"'$SELF' open $2 > /dev/null 2>&1\"" || return 1
+  plutil -replace CFBundleIdentifier -string "local.double-claude.$lbl" "$L/Contents/Info.plist"
+  (( DC_LAUNCHER_HIDE )) && plutil -replace LSUIElement -bool true "$L/Contents/Info.plist"
+  icns=($DC_APP_SRC/Contents/Resources/*.icns(N))   # il nome dell'icona cambia tra le versioni
+  if (( $#icns )); then cp "$icns[1]" "$L/Contents/Resources/applet.icns"; rm -f "$L/Contents/Resources/Assets.car"; fi
+  print -r -- "$2 $DC_VERSION" > "$L/Contents/Resources/double-claude"   # segno di riconoscimento per doctor
+  codesign -f -s - "$L" >/dev/null 2>&1
+  lsreg "$L"
+  return 0
+}
+
+# ---------------------------------------------------------------- backup
+BK=''
+do_backup() {
+  local base=$DC_HOME_CFG/backups/$(date +%Y%m%d-%H%M%S) i=1
+  BK=$base.noindex
+  while [[ -e $BK ]]; do BK=${base}_$((i++)).noindex; done   # due backup nello stesso secondo: _1 si ordina dopo
+  mkdir -p "$BK"
+  [[ -d $DC_A_CFG ]] && cp -Rp "$DC_A_CFG" "$BK/claude"
+  [[ -f $DC_A_JSON ]] && cp -p "$DC_A_JSON" "$BK/claude.json"
+  [[ -f $HOME/.zshrc ]] && cp -p "$HOME/.zshrc" "$BK/zshrc"
+  [[ -d $DC_B_CFG ]] && cp -Rp "$DC_B_CFG" "$BK/profile-b"
+  ok "backup in $(tilde $BK) ($(du -sh "$BK" 2>/dev/null | cut -f1 | tr -d " "))"
+}
+
+# ================================================================ comandi
+cmd_help() {
+  cat <<EOF
+${_b}double-claude${_r} ${_d}$DC_VERSION${_r}  due account Claude sullo stesso Mac, senza che si mescolino
+
+  ${_b}init${_r}          configura i due profili con qualche domanda
+  ${_b}doctor${_r}        controlla cosa è già separato e cosa no
+  ${_b}plan${_r}          mostra cosa farebbe apply, senza cambiare niente
+  ${_b}apply${_r} [pezzi] separa tutto, oppure solo: shell move mcp deny app
+  ${_b}open${_r} NOME     apre l'app del profilo giusto (usato dai launcher)
+  ${_b}status${_r}        mostra le app Claude aperte e il loro profilo
+  ${_b}backup${_r}        salva una copia delle configurazioni
+  ${_b}restore${_r} [n]   torna a un backup (il più recente se non indichi n)
+  ${_b}install${_r}       si copia in ~/.local/bin
+
+  Opzione: ${_b}--yes${_r} accetta le risposte predefinite.
+  Configurazione: $(tilde $DC_CONF)
+EOF
+}
+
+cmd_install() {
+  local dst=$HOME/.local/bin/double-claude fresh=0
+  h1 "Double Claude $DC_VERSION · installazione"
+  zsh -n "$SELF" 2>/dev/null || die "lo script in $(tilde $SELF) è incompleto o non è Double Claude. Copialo di nuovo dalla pagina."
+  ok "script completo ($(wc -l < "$SELF" | tr -d ' ') righe)"
+  mkdir -p "${dst:h}"
+  if [[ $SELF != $dst ]]; then cp "$SELF" "$dst"; fi
+  chmod +x "$dst"
+  ok "installato in $(tilde $dst)"
+  if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    if ! grep -qsF '.local/bin' "$HOME/.zshrc"; then
+      print -r -- 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+      ok "aggiunto ~/.local/bin al PATH in ~/.zshrc"
+    fi
+    fresh=1
+  fi
+  is_mac || warn "Double Claude è fatto per macOS: qui funziona solo in parte"
+  whence -p claude >/dev/null && ok "Claude Code trovato" || warn "non trovo il comando claude: installa prima Claude Code"
+  print
+  if (( fresh )); then say "Fatto. Apri un nuovo Terminale e scrivi ${_b}double-claude init${_r}"
+  else say "Fatto. Ora scrivi ${_b}double-claude init${_r}"; fi
+}
+
+cmd_init() {
+  load
+  h1 "double-claude · configurazione"
+  say "Due account Claude, separati su quattro livelli: account, app, Claude Code, cartelle."
+  say "${_d}Rispondi a qualche domanda. Niente cambia finché non lanci 'double-claude apply'.${_r}"
+
+  h2 "1. Da dove parti?"
+  say "   1) Ho un solo account e voglio aggiungerne un secondo"
+  say "   2) Ho due account ma un solo Claude: chat e impostazioni si mescolano"
+  say "   3) Ho già due profili, ma qualcosa si mescola"
+  local n; ask n "Scegli" ${${(M)DC_START:#one}:+1}${${(M)DC_START:#two}:+2}${${(M)DC_START:#split}:+3}
+  case $n in 1) DC_START=one;; 3) DC_START=split;; *) DC_START=two;; esac
+
+  h2 "2. I nomi"
+  say "   ${_d}A è il profilo che usi già (~/.claude, app Claude). B è il secondo.${_r}"
+  ask DC_A_LABEL "Nome di A" "$DC_A_LABEL"
+  ask DC_B_LABEL "Nome di B" "$DC_B_LABEL"
+  [[ $DC_A_LABEL == [a-z0-9-]## && $DC_B_LABEL == [a-z0-9-]## ]] || die "usa solo minuscole, numeri e trattini nei nomi."
+  [[ $DC_A_LABEL != $DC_B_LABEL ]] || die "i due nomi devono essere diversi."
+  unset DC_B_CMD DC_B_APP DC_B_CFG DC_B_DATA DC_CLONE; derive
+  say "   B avrà: comando ${_b}$DC_B_CMD${_r}, config ${_b}$(tilde $DC_B_CFG)${_r}, app ${_b}$DC_B_APP${_r}"
+
+  h2 "3. Zone ${_d}(facoltativo)${_r}"
+  say "   Vuoi legare uno dei due profili ad alcune cartelle? Per esempio: $DC_A_LABEL solo in ~/Documents/$DC_A_LABEL."
+  say "   ${_d}Se salti, i due comandi funzionano ovunque. Puoi aggiungere una zona più avanti con 'double-claude init'.${_r}"
+  say "   1) Salta: nessuna zona"
+  say "   2) $DC_A_LABEL solo lì, $DC_B_LABEL ovunque tranne lì"
+  say "   3) $DC_B_LABEL solo lì, $DC_A_LABEL ovunque tranne lì"
+  ask n "Scegli" ${${(M)DC_ZONE_OWNER:#none}:+1}${${(M)DC_ZONE_OWNER:#a}:+2}${${(M)DC_ZONE_OWNER:#b}:+3}
+  case $n in 2) DC_ZONE_OWNER=a;; 3) DC_ZONE_OWNER=b;; *) DC_ZONE_OWNER=none;; esac
+  if [[ $DC_ZONE_OWNER != none ]]; then
+    local cur="" d lbl
+    [[ $DC_ZONE_OWNER == a ]] && lbl=$DC_A_LABEL || lbl=$DC_B_LABEL
+    for d in $DC_ZONE_DIRS; do cur+="${cur:+, }$(tilde $d)"; done
+    ask n "Cartelle della zona, separate da virgola" "${cur:-~/Documents/$lbl}"
+    DC_ZONE_DIRS=()
+    for d in ${(s:,:)n}; do d=${${d## #}%% #}; [[ -n $d ]] && DC_ZONE_DIRS+=("$(expand $d)"); done
+    for d in $DC_ZONE_DIRS; do [[ -d $d ]] || warn "$(tilde $d) non esiste ancora"; done
+    (( $#DC_ZONE_DIRS )) || die "serve almeno una cartella."
+  else
+    DC_ZONE_DIRS=()
+  fi
+
+  h2 "4. Server MCP"
+  local -a in_a
+  if [[ -f $DC_A_JSON ]]; then scan; in_a=(${(s: :)S[mcp_a]}); fi
+  if (( $#in_a )); then
+    say "   In $DC_A_LABEL ci sono: ${_b}${in_a[*]}${_r}"
+    [[ $DC_START == one ]] && say "   ${_d}Con un solo account di solito non serve: lascia vuoto.${_r}"
+    ask n "Quali passano a $DC_B_LABEL? (nomi separati da spazio, vuoto = nessuno)" "${DC_MCP_MOVE[*]}"
+    DC_MCP_MOVE=(${(s: :)n})
+  else
+    say "   ${_d}Nessun server MCP globale in $DC_A_LABEL.${_r}"; DC_MCP_MOVE=()
+  fi
+
+  h2 "5. Cosa separare"
+  DC_MODULES=(shell)
+  say "   ${_d}Il comando $DC_B_CMD nel Terminale è sempre incluso.${_r}"
+  if [[ $DC_ZONE_OWNER != none ]]; then
+    if [[ $DC_START == one ]]; then confirm "Alcune chat fatte finora sono di $DC_B_LABEL e vanno spostate?" N && DC_MODULES+=(move)
+    else confirm "Sposto in $DC_B_LABEL le chat e la cronologia che gli appartengono?" S && DC_MODULES+=(move); fi
+  elif [[ $DC_START != one ]]; then
+    say "   ${_d}Senza zone non so quali chat sono di $DC_B_LABEL: restano dove sono.${_r}"
+  fi
+  (( $#DC_MCP_MOVE )) && DC_MODULES+=(mcp)
+  confirm "Aggiungo i divieti, così nessuno dei due legge i dati dell'altro?" S && DC_MODULES+=(deny)
+  if is_mac && [[ -d $DC_APP_SRC ]]; then
+    if confirm "Creo una seconda app Desktop per $DC_B_LABEL ($DC_B_APP)?" S; then
+      DC_MODULES+=(app)
+      say "   ${_d}I launcher possono stare nel Dock (e si possono fissare) oppure restarne fuori (si aprono da Spotlight).${_r}"
+      if confirm "Tengo i launcher fuori dal Dock?" $( (( DC_LAUNCHER_HIDE )) && print S || print N); then DC_LAUNCHER_HIDE=1; else DC_LAUNCHER_HIDE=0; fi
+    fi
+  else
+    say "   ${_d}App Desktop non trovata in $DC_APP_SRC: salto la seconda app.${_r}"
+  fi
+
+  save_conf
+  h2 "Fatto"
+  ok "configurazione salvata in $(tilde $DC_CONF)"
+  if [[ $DC_START == split ]]; then hint "ora: double-claude doctor"; else hint "ora: double-claude plan, poi double-claude apply"; fi
+}
+
+cmd_doctor() {
+  need_conf; load; scan
+  DC_TODO=0
+  h1 "double-claude · diagnosi  ${_d}$DC_A_LABEL (A) · $DC_B_LABEL (B)${_r}"
+
+  h2 "Account"
+  [[ ${S[json_a]} == broken ]] && { ko "~/.claude.json non è un JSON valido"; hint "ripristina un backup: double-claude restore"; }
+  [[ -n ${S[account_a]} ]] && ok "$DC_A_LABEL: ${S[account_a]}" || warn "$DC_A_LABEL: nessun login trovato in ~/.claude.json"
+  if [[ ! -d $DC_B_CFG ]]; then ko "$DC_B_LABEL non ha ancora una config ($(tilde $DC_B_CFG))"; hint "double-claude apply shell"
+  elif [[ -z ${S[account_b]} ]]; then ko "$DC_B_LABEL: nessun login"; hint "esci da claude.ai nel browser, poi: cd ~ && $DC_B_CMD e dentro /login"
+  else ok "$DC_B_LABEL: ${S[account_b]}"; fi
+  [[ -n ${S[account_a]} && ${S[account_a]} == ${S[account_b]} ]] && { ko "A e B usano lo stesso account"; hint "esci da claude.ai nel browser, poi /logout e /login in $DC_B_CMD"; }
+  if [[ ${S[app_same]} == 1 ]]; then
+    ko "le app $DC_A_APP e $DC_B_APP usano lo stesso account"
+    hint "chiudi $DC_A_APP, poi in $DC_B_APP esci e rientra con l'account $DC_B_LABEL (il link di accesso va all'app aperta)"
+  fi
+
+  h2 "Terminale"
+  [[ -n $CLAUDE_BIN ]] && ok "claude installato ($(tilde $CLAUDE_BIN))" || ko "comando claude non trovato"
+  if grep -qs '^# >>> double-claude >>>' "$HOME/.zshrc"; then ok "comando $DC_B_CMD in ~/.zshrc"
+  elif grep -qsF -- "$DC_B_CFG" "$HOME/.zshrc" || grep -qsF -- "$(tilde $DC_B_CFG)" "$HOME/.zshrc"; then ok "comando $DC_B_CMD in ~/.zshrc ${_d}(creato a mano)${_r}"
+  else ko "manca il comando $DC_B_CMD"; hint "double-claude apply shell"; fi
+  local al; al=$(grep -nE "^[[:space:]]*alias[[:space:]]+(claude|$DC_B_CMD)=" "$HOME/.zshrc" 2>/dev/null)
+  [[ -n $al ]] && { ko "un alias scavalca le funzioni (riga ${al%%:*} di ~/.zshrc)"; hint "togli quella riga"; }
+
+  if [[ $DC_ZONE_OWNER != none ]]; then
+    h2 "Chat e cronologia  ${_d}zona $([[ $DC_ZONE_OWNER == a ]] && print $DC_A_LABEL || print $DC_B_LABEL): ${(j:, :)${(@f)$(for d in $DC_ZONE_DIRS; do tilde $d; done)}}${_r}"
+    local c=${S[chats_b]} h=${S[history_b]} r=${S[registry_b]}
+    if (( c + h + r == 0 )); then ok "in $DC_A_LABEL non c'è niente di $DC_B_LABEL"
+    else ko "in $DC_A_LABEL ci sono dati di $DC_B_LABEL: $c chat, $h righe di cronologia, $r voci di registro"; hint "double-claude apply move"; fi
+  else
+    h2 "Zone"
+    say "    ${_d}Nessuna zona: claude e $DC_B_CMD funzionano in ogni cartella. Per aggiungerne una: double-claude init.${_r}"
+  fi
+
+  if (( $#DC_MCP_MOVE )) || [[ -n ${S[mcp_a]}${S[mcp_b]} ]]; then
+    h2 "Server MCP"
+    say "    ${_d}$DC_A_LABEL: ${S[mcp_a]:-nessuno} · $DC_B_LABEL: ${S[mcp_b]:-nessuno}${_r}"
+    local s; for s in $DC_MCP_MOVE; do
+      if [[ " ${S[mcp_a]} " == *" $s "* ]]; then ko "$s è ancora in $DC_A_LABEL"; hint "double-claude apply mcp"
+      elif [[ " ${S[mcp_b]} " == *" $s "* ]]; then ok "$s è solo in $DC_B_LABEL"
+      else warn "$s non c'è in nessuno dei due"; fi
+    done
+  fi
+
+  if has_mod deny; then
+    h2 "Divieti"
+    local ma mb
+    ma=$(deny_missing "$DC_A_CFG/settings.json" "$(rules_a)"); mb=$(deny_missing "$DC_B_CFG/settings.json" "$(rules_b)")
+    [[ $ma == 0 ]] && ok "$DC_A_LABEL non può leggere i dati di $DC_B_LABEL" || { ko "$DC_A_LABEL: mancano $ma divieti"; hint "double-claude apply deny"; }
+    [[ $mb == 0 ]] && ok "$DC_B_LABEL non può leggere i dati di $DC_A_LABEL" || { ko "$DC_B_LABEL: mancano $mb divieti"; hint "double-claude apply deny"; }
+  fi
+
+  if has_mod app; then
+    h2 "App Desktop"
+    if [[ ! -d $DC_APP_SRC ]]; then ko "non trovo $DC_APP_SRC"
+    else
+      local v; v=$(appver "$DC_CLONE")
+      case $(clone_state) in
+        missing) ko "manca la copia dell'app per $DC_B_LABEL"; hint "double-claude apply app";;
+        behind)  warn "la copia ($v) è più vecchia di $DC_A_APP: si aggiorna al prossimo clic sul launcher";;
+        ahead)   ok "copia dell'app per $DC_B_LABEL ($v, più recente di $DC_A_APP: la tengo)";;
+        unknown) warn "non leggo la versione della copia: la lascio com'è";;
+        *)       ok "copia dell'app per $DC_B_LABEL aggiornata ($v)";;
+      esac
+      [[ -e $DC_CLONE.refreshing || -e $DC_CLONE.previous ]] && warn "un aggiornamento della copia si è interrotto: si sistema al prossimo clic sul launcher"
+      case ${S[updates_b]} in
+        off) ok "la copia non si aggiorna da sola${${(M)S[updates_ours]:#0}:+ ${_d}(blocco già presente in $(tilde $DC_B_3P))${_r}}";;
+        on)  ko "la copia si aggiorna da sola e si riapre sull'account $DC_A_LABEL"
+             if [[ ${S[updates_ours]} == 1 ]]; then hint "double-claude apply app"
+             else hint "$(tilde $DC_B_3P) non è di double-claude (forse un gateway di inferenza): non la tocco. Blocca gli aggiornamenti lì dentro."; fi;;
+        *)   ko "la copia si aggiorna da sola e si riapre sull'account $DC_A_LABEL"; hint "double-claude apply app";;
+      esac
+      [[ -n $(strays) ]] && { ko "$DC_B_APP è aperta senza il suo profilo e mostra l'account $DC_A_LABEL"; hint "chiudila con ⌘Q e riaprila dal launcher $DC_B_APP"; }
+      dock_has_clone && { ko "nel Dock è fissata la copia di $DC_B_APP, non il launcher: da lì si apre sull'account $DC_A_LABEL"
+        hint "tasto destro sull'icona nel Dock → Opzioni → Rimuovi dal Dock$( (( DC_LAUNCHER_HIDE )) && print ', poi apri da Spotlight' || print ', poi fissa il launcher')"; }
+      local L="$HOME/Applications/$DC_B_APP.app" m=''
+      [[ -f $L/Contents/Resources/double-claude ]] && m=$(<$L/Contents/Resources/double-claude)
+      if [[ ! -d $L ]]; then ko "manca il launcher $DC_B_APP"; hint "double-claude apply app"
+      elif [[ $m == *' '* ]]; then ok "il launcher $DC_B_APP passa CLAUDE_CONFIG_DIR"
+      elif [[ -n $m ]]; then warn "il launcher $DC_B_APP è della versione 1.0: lavora in background e da macOS 27 può fermarsi a metà"; hint "double-claude apply app"
+      else
+        warn "il launcher $DC_B_APP non è di double-claude: verifica che passi CLAUDE_CONFIG_DIR"
+        local scpt=$L/Contents/Resources/Scripts/main.scpt
+        if whence -p osadecompile >/dev/null && [[ -f $scpt ]] && osadecompile "$scpt" 2>/dev/null | grep -qE '&[[:space:]]*\\?"'; then
+          warn "lancia in background (&): da macOS 27 l'aggiornamento della copia può restare a metà"
+        fi
+        hint "double-claude apply app lo sostituisce (il vecchio va nel backup)"
+      fi
+      [[ -d $DC_B_DATA ]] && ok "$DC_B_APP ha i suoi dati" || { warn "$DC_B_APP non è mai stata aperta"; hint "aprila da Spotlight e fai il login con l'account $DC_B_LABEL"; }
+    fi
+    say "    ${_d}Controllo a mano: nella scheda Code di $DC_B_APP scrivi «esegui echo \$CLAUDE_CONFIG_DIR».${_r}"
+    say "    ${_d}Deve rispondere $DC_B_CFG.${_r}"
+  fi
+
+  print
+  if (( DC_TODO == 0 )); then say "${_g}${_b}Tutto separato.${_r}"
+  else say "${_b}$DC_TODO $( (( DC_TODO == 1 )) && print cosa || print cose ) da sistemare.${_r} Segui le frecce →, poi rilancia ${_b}double-claude doctor${_r}."; fi
+}
+
+cmd_plan() {
+  need_conf; load
+  h1 "double-claude · piano  ${_d}niente viene modificato${_r}"
+  say "  ${_d}Prima di tutto: backup in $(tilde $DC_HOME_CFG/backups)${_r}"
+  if has_mod shell; then
+    h2 "shell · comando $DC_B_CMD"
+    say "  Crea $(tilde $DC_B_CFG) e aggiunge questo blocco a ~/.zshrc:"
+    zsh_block | sed 's/^/    /'
+  fi
+  if has_mod move; then
+    h2 "move · chat e cronologia"
+    DC_DRY=1 engine move | sed 's/^/  /'
+  fi
+  if has_mod mcp && (( $#DC_MCP_MOVE )); then
+    h2 "mcp · server"
+    say "  Da $DC_A_LABEL a $DC_B_LABEL: ${DC_MCP_MOVE[*]}"
+  fi
+  if has_mod deny; then
+    h2 "deny · divieti"
+    say "  $DC_A_LABEL non tocca:"; rules_a | sed 's/^/    /'
+    say "  $DC_B_LABEL non tocca:"; rules_b | sed 's/^/    /'
+  fi
+  if has_mod app; then
+    h2 "app · seconda app Desktop"
+    say "  Copia:     $(tilde $DC_CLONE)"
+    say "  Dati:      $(tilde $DC_B_DATA)"
+    say "  Launcher:  ~/Applications/$DC_A_APP.app, ~/Applications/$DC_B_APP.app $( (( DC_LAUNCHER_HIDE )) && print '(fuori dal Dock)' || print '(si possono fissare nel Dock)')"
+    if [[ -d $DC_B_3P && ! -f $DC_B_3P/.double-claude ]]; then say "  Aggiornamenti: $(tilde $DC_B_3P) esiste già e non è di double-claude, non la tocco"
+    else say "  Aggiornamenti: bloccati per la copia con una policy in $(tilde $DC_B_3P)"; fi
+  fi
+  print; hint "per procedere: double-claude apply"
+}
+
+apply_shell() {
+  h2 "shell · comando $DC_B_CMD"
+  mkdir -p "$DC_B_CFG"
+  touch "$HOME/.zshrc"
+  strip_block "$HOME/.zshrc"
+  [[ -s $HOME/.zshrc && -n "$(tail -c1 "$HOME/.zshrc")" ]] && print >> "$HOME/.zshrc"
+  zsh_block >> "$HOME/.zshrc"
+  ok "aggiunto a ~/.zshrc"
+  local al; al=$(grep -nE "^[[:space:]]*alias[[:space:]]+(claude|$DC_B_CMD)=" "$HOME/.zshrc")
+  [[ -n $al ]] && warn "un alias scavalca le funzioni (riga ${al%%:*} di ~/.zshrc): toglilo"
+  hint "apri un nuovo Terminale per usarlo"
+  if [[ ! -f $DC_B_CFG/.claude.json ]] || ! grep -q emailAddress "$DC_B_CFG/.claude.json" 2>/dev/null; then
+    say "  Login di $DC_B_LABEL:"
+    say "    1. nel browser esci da claude.ai (o usa una finestra privata)"
+    say "    2. in un nuovo Terminale: ${_b}cd ~ && $DC_B_CMD${_r}"
+    say "    3. dentro scrivi ${_b}/login${_r} e accedi con l'account $DC_B_LABEL"
+  fi
+}
+
+apply_move() {
+  h2 "move · chat e cronologia"
+  [[ $DC_ZONE_OWNER == none ]] && { warn "senza zone non so quali chat sono di $DC_B_LABEL: salto"; return 0; }
+  local r; r=$(running)
+  if [[ -n $r ]]; then
+    warn "Claude è aperto e riscrive i suoi file mentre gira:"
+    print -r -- "$r" | sed 's/^/      /'
+    say "    Chiudi le app con ⌘Q e i Terminali dove gira claude."
+    confirm "Continuo lo stesso?" N || return 1
+  fi
+  DC_DRY=1 engine move | sed 's/^/  /'
+  confirm "Sposto?" S || return 0
+  DC_DRY=0 engine move | sed 's/^/  /' | tail -n 1
+}
+
+apply_mcp() {
+  h2 "mcp · server"
+  (( $#DC_MCP_MOVE )) || { ok "nessun server da spostare"; return 0; }
+  [[ -n $CLAUDE_BIN ]] || { ko "comando claude non trovato"; return 1; }
+  scan
+  local s j
+  for s in $DC_MCP_MOVE; do
+    j=$(DC_ARG=$s engine mcp-get 2>/dev/null)
+    if [[ " ${S[mcp_b]} " != *" $s "* ]]; then
+      [[ -n $j ]] || { warn "$s non è tra i server globali di $DC_A_LABEL"; continue; }
+      if CLAUDE_CONFIG_DIR=$DC_B_CFG "$CLAUDE_BIN" mcp add-json "$s" "$j" -s user >/dev/null 2>&1; then ok "$s aggiunto a $DC_B_LABEL"
+      else ko "$s: non riesco ad aggiungerlo a $DC_B_LABEL"; continue; fi
+    fi
+    if [[ -n $j ]]; then
+      "$CLAUDE_BIN" mcp remove "$s" -s user >/dev/null 2>&1 && ok "$s tolto da $DC_A_LABEL" || ko "$s: non riesco a toglierlo da $DC_A_LABEL"
+    fi
+  done
+}
+
+apply_deny() {
+  h2 "deny · divieti"
+  local n
+  n=$(DC_FILE=$DC_A_CFG/settings.json DC_RULES="$(rules_a)" engine deny); ok "$DC_A_LABEL: $n divieti aggiunti"
+  n=$(DC_FILE=$DC_B_CFG/settings.json DC_RULES="$(rules_b)" engine deny); ok "$DC_B_LABEL: $n divieti aggiunti"
+  hint "i divieti fermano gli strumenti file di Claude Code, non i comandi Bash (valuta /sandbox)"
+}
+
+apply_app() {
+  h2 "app · seconda app Desktop"
+  is_mac || { warn "solo su macOS"; return 0; }
+  [[ -d $DC_APP_SRC ]] || { ko "non trovo $DC_APP_SRC"; return 1; }
+  [[ $SELF == */Downloads/* || $SELF == /tmp/* || $SELF == /private/* ]] && warn "i launcher useranno $(tilde $SELF): meglio prima 'double-claude install'"
+  local r=0
+  if build_clone; then
+    case $CLONE_DID in
+      missing) ok "copia dell'app in $(tilde ${DC_CLONE:h})";;
+      behind)  ok "copia dell'app aggiornata alla versione di $DC_A_APP";;
+      ahead)   ok "la copia è più recente di $DC_A_APP: la tengo";;
+      unknown) warn "non leggo la versione della copia: la lascio com'è";;
+      *)       ok "copia dell'app già aggiornata";;
+    esac
+  else ko "non riesco a copiare l'app: la copia di prima resta com'era"; r=1; fi
+  case $(block_updates) in
+    ours)    ok "aggiornamento automatico della copia bloccato";;
+    foreign) warn "$(tilde $DC_B_3P) esiste già e non è di double-claude: non la tocco"
+             hint "se la copia si aggiorna da sola si riapre sull'account $DC_A_LABEL: double-claude doctor lo controlla";;
+    *)       ko "non riesco a bloccare l'aggiornamento automatico della copia"; r=1;;
+  esac
+  mk_launcher "$DC_A_APP" a && ok "launcher ~/Applications/$DC_A_APP.app"
+  mk_launcher "$DC_B_APP" b && ok "launcher ~/Applications/$DC_B_APP.app ${_d}(passa CLAUDE_CONFIG_DIR)${_r}"
+  (( DC_LAUNCHER_HIDE )) && hint "i launcher restano fuori dal Dock: aprili da Spotlight" || hint "per il Dock fissa i launcher, non le app aperte"
+  say "  Primo avvio:"
+  say "    1. chiudi Claude con ⌘Q e nel browser esci da claude.ai"
+  say "    2. apri ${_b}$DC_B_APP${_r} da Spotlight e accedi con l'account $DC_B_LABEL"
+  say "    3. da ora apri sempre ${_b}$DC_A_APP${_r} e ${_b}$DC_B_APP${_r} dai launcher"
+  say "    4. nascondi /Applications/Claude.app da Spotlight (Impostazioni di Sistema → Spotlight)"
+  say "  ${_d}Per distinguerle nel Dock: Finder → Ottieni informazioni sulla copia → trascina un'icona su quella in alto.${_r}"
+  return $r
+}
+
+cmd_apply() {
+  need_conf; load
+  local -a mods=("$@"); (( $#mods )) || mods=($DC_MODULES)
+  local m; for m in $mods; do [[ $m == (shell|move|mcp|deny|app) ]] || die "pezzo sconosciuto: $m (usa shell, move, mcp, deny, app)"; done
+  h1 "double-claude · apply  ${_d}${mods[*]}${_r}"
+  do_backup
+  for m in $mods; do apply_$m || warn "$m non completato"; done
+  print; hint "controlla con: double-claude doctor"
+}
+
+cmd_open() {
+  load
+  case ${1:-} in
+    a|$DC_A_LABEL) open_a;;
+    b|$DC_B_LABEL) open_b;;
+    *) die "uso: double-claude open $DC_A_LABEL|$DC_B_LABEL";;
+  esac
+}
+
+cmd_status() {
+  load
+  h1 "double-claude · app aperte"
+  local line pid any=0
+  while read -r line; do
+    [[ -z $line ]] && continue; any=1; pid=${line%% *}
+    if [[ $line == *--user-data-dir=* ]]; then say "  ${_o}B${_r} $DC_B_LABEL  ${_d}pid $pid${_r}"
+    elif [[ $line == *"$DC_CLONE/"* ]]; then say "  ${_red}!${_r} $DC_B_APP senza il suo profilo: mostra l'account $DC_A_LABEL  ${_d}pid $pid${_r}"
+    else say "  ${_a}A${_r} $DC_A_LABEL  ${_d}pid $pid${_r}"; fi
+  done < <(ps -A -o pid= -o command= 2>/dev/null | grep -E '\.app/Contents/MacOS/Claude( --|$)' | grep -v grep | sed 's/^ *//')
+  (( any )) || say "  ${_d}nessuna app Claude aperta${_r}"
+}
+
+cmd_backup() { load; h1 "double-claude · backup"; do_backup; }
+
+cmd_restore() {
+  load
+  local -a all=($DC_HOME_CFG/backups/*.noindex(N/nOn))
+  (( $#all )) || die "nessun backup in $(tilde $DC_HOME_CFG/backups)"
+  h1 "double-claude · restore"
+  local i=1 b; for b in $all; do say "  $i) ${b:t:r}"; (( i++ )); done
+  local n; ask n "Quale?" 1
+  local src=${all[$n]}; [[ -d $src ]] || die "scelta non valida"
+  [[ -z $(running) ]] || die "chiudi prima le app Claude e i Terminali dove gira claude."
+  confirm "Riporto tutto a ${src:t:r}? Prima salvo lo stato attuale." S || return 0
+  do_backup
+  [[ -d $src/claude ]]      && { rm -rf "$DC_A_CFG"; cp -Rp "$src/claude" "$DC_A_CFG"; ok "~/.claude"; }
+  [[ -f $src/claude.json ]] && { cp -p "$src/claude.json" "$DC_A_JSON"; ok "~/.claude.json"; }
+  [[ -f $src/zshrc ]]       && { cp -p "$src/zshrc" "$HOME/.zshrc"; ok "~/.zshrc"; }
+  if [[ -d $src/profile-b ]]; then rm -rf "$DC_B_CFG"; cp -Rp "$src/profile-b" "$DC_B_CFG"; ok "$(tilde $DC_B_CFG)"
+  elif [[ -d $DC_B_CFG ]]; then rm -rf "$DC_B_CFG"; ok "$(tilde $DC_B_CFG) tolta: in quel backup non esisteva ancora"; fi
+  hint "lo stato di prima è nel backup appena fatto: $(tilde $BK)"
+}
+
+# ================================================================ avvio
+local -a args
+for a in "$@"; do case $a in -y|--yes) DC_YES=1;; *) args+=("$a");; esac; done
+set -- "${args[@]}"
+case ${1:-help} in
+  init)       cmd_init;;
+  doctor)     cmd_doctor;;
+  plan)       cmd_plan;;
+  apply)      shift; cmd_apply "$@";;
+  open)       shift; cmd_open "$@";;
+  status)     cmd_status;;
+  backup)     cmd_backup;;
+  restore)    cmd_restore;;
+  install)    cmd_install;;
+  -v|--version|version) print $DC_VERSION;;
+  help|-h|--help) cmd_help;;
+  *) cmd_help; exit 1;;
+esac
