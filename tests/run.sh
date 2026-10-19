@@ -17,7 +17,7 @@ cat > $T/bin/claude <<'EOF'
 #!/usr/bin/env node
 const fs=require('fs'),H=process.env.HOME,c=process.env.CLAUDE_CONFIG_DIR;const f=c?c+'/.claude.json':H+'/.claude.json';
 let j={};try{j=JSON.parse(fs.readFileSync(f,'utf8'))}catch(e){}
-const a=process.argv.slice(2);j.mcpServers=j.mcpServers||{};
+const a=process.argv.slice(2);if(a[0]==='--version'){console.log((process.env.FAKE_CLAUDE_VERSION||'2.1.303')+' (Claude Code)');process.exit(0)}j.mcpServers=j.mcpServers||{};
 if(a[0]==='mcp'&&a[1]==='add-json'){if(j.mcpServers[a[2]]){process.exit(1)}j.mcpServers[a[2]]=JSON.parse(a[3]);}
 else if(a[0]==='mcp'&&a[1]==='remove'){if(!j.mcpServers[a[2]])process.exit(1);delete j.mcpServers[a[2]];}
 else if(a[0]==='mcp'&&a[1]==='list'){console.log(Object.keys(j.mcpServers).join('\n'));process.exit(0)}
@@ -40,7 +40,7 @@ mk $H/Documents/work s1; mk $H/Documents/work/app s2; mk $H s3; mk $H/Documents/
 print -l "{\"display\":\"a\",\"project\":\"$H/Documents/work\"}" "{\"display\":\"b\",\"project\":\"$H\"}" "{\"display\":\"c\",\"project\":\"$H/Documents/side\"}" > $H/.claude/history.jsonl
 cat > $H/.claude.json <<EOF
 {"oauthAccount":{"emailAddress":"alex@acme.example"},"mcpServers":{"notes":{"type":"stdio","command":"npx","args":["notes-mcp"]},"github":{"type":"http","url":"https://x"}},
- "projects":{"$H/Documents/work":{},"$H/Documents/work/app":{},"$H":{},"$H/Documents/side":{}}}
+ "projects":{"$H/Documents/work":{},"$H/Documents/work/app":{},"$H":{},"$H/Documents/side":{"allowedTools":["Bash(npm test)"],"mcpServers":{"db":{"command":"db-mcp"}}}}}
 EOF
 print '{"permissions":{"allow":["Bash(ls:*)"]}}' > $H/.claude/settings.json
 print -l 'export X=1' 'alias claude-personal="CLAUDE_CONFIG_DIR=~/.claude-personal claude"' > $H/.zshrc
@@ -62,6 +62,9 @@ check "registro di A ripulito" "node -e \"process.exit(Object.keys(require('$H/.
 check "MCP notes spostato in B" "node -e \"j=require('$H/.claude-personal/.claude.json');k=require('$H/.claude.json');process.exit(j.mcpServers.notes&&!k.mcpServers.notes?0:1)\""
 check "divieti scritti e regole utente conservate" "grep -q 'Read(~/.claude-personal/\*\*)' $H/.claude/settings.json && grep -q 'Bash(ls:\*)' $H/.claude/settings.json"
 check "divieti di B sulla cartella di lavoro" "grep -q 'Read(~/Documents/work/\*\*)' $H/.claude-personal/settings.json"
+check "registro spostato in B con server MCP e permessi del progetto" "node -e \"b=require('$H/.claude-personal/.claude.json').projects['$H/Documents/side'];process.exit(b&&b.mcpServers.db&&b.allowedTools[0]==='Bash(npm test)'?0:1)\""
+check "work legge solo dalla sua cartella" "node -e \"p=require('$H/.claude/settings.json').permissions;process.exit(p.blockReadsOutsideWorkingDirectories===true&&p.additionalDirectories[0]==='$H/Documents/work'?0:1)\""
+check "personal senza cartella: nessun blocco" "! grep -q blockReads $H/.claude-personal/settings.json"
 $CS --yes apply shell >/dev/null
 check "blocco zshrc idempotente" "[[ \$(grep -c '>>> double-claude' $H/.zshrc) -eq 1 ]]"
 sed -i.bak '/^alias/d' $H/.zshrc
@@ -73,6 +76,9 @@ r3=$(cd $H/Documents/side && zsh -c "source $H/.zshrc; claude-personal mcp list"
 check "B usa la sua config fuori dalla cartella di A" "[[ \$r3 == *notes* ]]"
 out=$($CS doctor)
 check "doctor dopo apply: resta solo il login di B" "[[ \$out == *'1 cosa da sistemare'* ]]"
+check "doctor: work legge solo dalla sua cartella" "[[ \$out == *'work legge file solo da: ~/Documents/work'* ]]"
+out=$(FAKE_CLAUDE_VERSION=2.1.200 $CS doctor)
+check "doctor: Claude Code troppo vecchio per il blocco" "[[ \$out == *'Claude Code 2.1.200 non conosce il blocco delle letture'* ]]"
 
 n=$(ls -d $H/.config/double-claude/backups/*.noindex | wc -l)
 print "$n\ns" | $CS restore >/dev/null 2>&1   # il più vecchio
@@ -88,22 +94,31 @@ check "start=one, cartella di B" "grep -q 'DC_START=one' $H/.config/double-claud
 check "move non scelto" "grep -q 'DC_MODULES=(shell deny)' $H/.config/double-claude/config"
 plan=$($CS plan)
 check "claude rifiutato dentro la cartella di B" "[[ \$plan == *'claude: questa cartella è di acme'* ]]"
+check "plan: acme legge solo dalla sua cartella" "[[ \$plan == *'acme legge file solo da: ~/Projects/acme'* ]]"
 check "plan annuncia la cartella da creare" "[[ \$plan == *'Crea anche le cartelle dedicate: ~/Projects/acme'* ]]"
 out=$($CS --yes apply shell)
 check "login di B dalla sua cartella" "[[ \$out == *'cd ~/Projects/acme && claude-acme'* ]]"
 check "apply crea la cartella di B" "[[ -d $H/Projects/acme ]]"
+for i in {1..7}; do $CS backup >/dev/null; done
+check "si tengono solo gli ultimi 5 backup" "[[ \$(ls -d $H/.config/double-claude/backups/*.noindex | wc -l) -eq 5 ]]"
 
 # ---------------------------------------------------------------- scenario 3: zone saltate
 print "Scenario 3: zone saltate (--yes)"
 export HOME=$T/lee; H=$HOME; mkdir -p $H/Documents/any; cd $H
-print '{"oauthAccount":{"emailAddress":"lee@example.org"}}' > $H/.claude.json
+SCR="$H/Library/Application Support/Claude-Personal/scratch-workspaces/x/y"
+d=$H/.claude/projects/${SCR//[^A-Za-z0-9]/-}; mkdir -p $d; print -r -- "{\"cwd\":\"$SCR\"}" > $d/s.jsonl
+mkdir -p $H/.claude/projects/-Users-lee-Documents-any; print -r -- "{\"cwd\":\"$H/Documents/any\"}" > $H/.claude/projects/-Users-lee-Documents-any/t.jsonl
+print -r -- "{\"oauthAccount\":{\"emailAddress\":\"lee@example.org\"},\"projects\":{\"$SCR\":{}}}" > $H/.claude.json
 $CS --yes init >/dev/null
 check "--yes non sceglie cartelle dedicate" "grep -q 'DC_A_DIRS=()' $H/.config/double-claude/config && grep -q 'DC_B_DIRS=()' $H/.config/double-claude/config"
-check "senza zone lo spostamento non è scelto" "! grep -q 'DC_MODULES=.*move' $H/.config/double-claude/config"
+check "senza cartelle dedicate lo spostamento resta proposto (scheda Code)" "grep -q 'DC_MODULES=(shell move deny)' $H/.config/double-claude/config"
+out=$($CS doctor)
+check "doctor vede la chat della scheda Code di B finita in A" "[[ \$out == *'1 chat, 0 righe di cronologia, 1 voci di registro'* ]]"
 out=$($CS doctor)
 check "doctor spiega che non ci sono cartelle dedicate" "[[ \$out == *'Nessuna: claude e claude-personal funzionano in ogni cartella'* ]]"
 $CS --yes apply >/dev/null
 r1=$(cd $H/Documents/any && zsh -c "source $H/.zshrc; whence -w claude-personal; whence -w claude" 2>&1)
+check "chat della scheda Code spostata in B, l'altra resta in A" "[[ -d $H/.claude-personal/projects/${${SCR//[^A-Za-z0-9]/-}} && -d $H/.claude/projects/-Users-lee-Documents-any ]]"
 check "senza zone: solo la funzione di B, claude resta quello vero" "[[ \$r1 == *'claude-personal: function'* && \$r1 != *'claude: function'* ]]"
 
 # ---------------------------------------------------------------- scenario 3b: una cartella per ciascuno
@@ -126,6 +141,17 @@ check "claude nella cartella di personal: indica claude-personal" "[[ \$r2 == *'
 r3=$(cd $H/Documents/side && zsh -c "source $H/.zshrc; claude mcp list" 2>&1)
 check "comandi di gestione ovunque" "[[ \$r3 != *'lavora solo'* ]]"
 check "divieti incrociati" "grep -q 'Read(~/Documents/personal/\*\*)' $H/.claude/settings.json && grep -q 'Read(~/Documents/work/\*\*)' $H/.claude-personal/settings.json"
+check "una cartella per ciascuno: blocco in tutti e due i profili" "grep -q '\"blockReadsOutsideWorkingDirectories\": true' $H/.claude/settings.json && grep -q '\"blockReadsOutsideWorkingDirectories\": true' $H/.claude-personal/settings.json"
+node -e "f='$H/.claude/settings.json';j=require(f);j.permissions.deny.push('Read(~/segreti/**)');j.sandbox={network:{allowedDomains:['example.org']}};require('fs').writeFileSync(f,JSON.stringify(j))"
+sed -i.bak 's/^DC_SANDBOX=0/DC_SANDBOX=1/' $H/.config/double-claude/config
+$CS --yes apply deny >/dev/null
+check "sandbox attivo nei due profili" "node -e \"a=require('$H/.claude/settings.json');b=require('$H/.claude-personal/settings.json');process.exit(a.sandbox.enabled&&b.sandbox.enabled?0:1)\""
+sed -i.bak 's/^DC_SANDBOX=1/DC_SANDBOX=0/; s/^DC_A_DIRS=.*/DC_A_DIRS=()/; s/^DC_B_DIRS=.*/DC_B_DIRS=()/' $H/.config/double-claude/config
+$CS --yes apply deny >/dev/null
+check "tolte le cartelle: via blocco, cartelle di lavoro e divieti incrociati" "node -e \"p=require('$H/.claude/settings.json').permissions;process.exit(!p.blockReadsOutsideWorkingDirectories&&!p.additionalDirectories&&!p.deny.some(x=>x.includes('Documents/personal'))?0:1)\""
+check "regole e impostazioni dell'utente restano" "node -e \"j=require('$H/.claude/settings.json');process.exit(j.permissions.deny.includes('Read(~/segreti/**)')&&j.sandbox.network.allowedDomains[0]==='example.org'&&j.sandbox.enabled===undefined?0:1)\""
+out=$($CS doctor)
+check "doctor dopo il cambio: niente avanzi" "[[ \$out != *'configurazione precedente'* ]]"
 print -l 'DC_A_LABEL=work' 'DC_B_LABEL=personal' 'DC_ZONE_OWNER=b' "DC_ZONE_DIRS=($H/Documents/personal)" 'DC_MODULES=(shell)' > $H/.config/double-claude/config
 plan=$($CS plan)
 check "config della 1.1.0 (zona di B) letta come cartella di B" "[[ \$plan == *'_dc_b=('* && \$plan == *'Documents/personal'* && \$plan == *'claude-personal: lavora solo in ~/Documents/personal. Qui usa claude.'* ]]"
@@ -163,7 +189,7 @@ chmod +x $M/*
 export PATH=$M:$PATH DC_APP=$SRC DC_FAKE_MAC=1 DC_LSREGISTER=$M/lsregister LOGS=$T/logs; mkdir -p $LOGS
 SELF_BIN=$CS
 
-printf '1\nwork\npersonal\n1\ns\ns\ns\n' | $CS init >/dev/null
+printf '1\nwork\npersonal\n1\ns\nn\ns\ns\n' | $CS init >/dev/null
 check "init: app scelta, launcher fuori dal Dock" "grep -q 'DC_MODULES=(shell deny app)' $H/.config/double-claude/config && grep -q 'DC_LAUNCHER_HIDE=1' $H/.config/double-claude/config"
 CL="$H/Library/Application Support/claude-personal-app.noindex/Claude Personal.app"
 D="$H/Library/Application Support/Claude-Personal"; P3="$D-3p"

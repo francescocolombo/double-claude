@@ -42,7 +42,7 @@ Requisiti: macOS, zsh (predefinita), Claude Code installato. Non servono altri p
 | `status` | mostra le app Claude aperte e il loro profilo |
 | `backup` / `restore` | salva una copia e torna indietro |
 
-`apply` fa sempre un backup prima di cambiare qualcosa, in `~/.config/double-claude/backups`.
+`apply` fa sempre un backup prima di cambiare qualcosa, in `~/.config/double-claude/backups`. Su macOS è una copia APFS istantanea, che occupa spazio solo per quello che cambia dopo; si tengono gli ultimi 5.
 
 ## Account e profili
 
@@ -53,14 +53,22 @@ Double Claude dà a ogni account il suo profilo.
 
 ## Cartelle dedicate (facoltative)
 
-Un profilo con una cartella dedicata lavora solo lì: il suo comando parte solo dentro quella cartella e l'altro profilo non può leggerla. `init` propone quattro scelte:
+Un profilo con una cartella dedicata lavora solo lì: il suo comando parte solo dentro quella cartella, i suoi strumenti file leggono solo da lì e l'altro profilo non può leggerla. `init` propone quattro scelte:
 
 1. nessuna cartella dedicata: i due comandi funzionano ovunque;
 2. il secondo profilo lavora solo in `~/Documents/<nome>`, il primo ovunque tranne lì;
 3. il primo profilo lavora solo in `~/Documents/<nome>`, il secondo ovunque tranne lì;
 4. una cartella per ciascuno: ognuno lavora solo nella sua.
 
-Il percorso si può cambiare, e le cartelle che non esistono le crea `apply`. Le cartelle dedicate servono anche a capire di chi sono le chat già mescolate: senza, `apply move` non sposta niente. Si possono aggiungere più avanti rilanciando `init`.
+Il percorso si può cambiare, e le cartelle che non esistono le crea `apply`.
+
+Il blocco delle letture usa `permissions.blockReadsOutsideWorkingDirectories` di Claude Code (dalla versione 2.1.257) e vale anche nella scheda Code dell'app: Read, Grep e Glob rifiutano i file fuori dalle cartelle del profilo. I comandi Bash che leggono fuori chiedono il permesso; con il sandbox sono bloccati.
+
+Le cartelle dedicate servono anche a capire di chi sono le chat già mescolate. Senza cartelle dedicate `apply move` sposta solo le chat nate nella scheda Code della seconda app, che hanno la cartella dentro i dati di quell'app. Le cartelle si possono aggiungere più avanti rilanciando `init`: Double Claude ricorda cosa ha scritto nelle impostazioni e toglie quello che non serve più, senza toccare le regole tue.
+
+## Sandbox (facoltativo)
+
+I divieti valgono per gli strumenti file di Claude Code e per i comandi che nominano un file, come `cat`, `head`, `sed` e i redirect. Non fermano uno script Python o Node, né `grep -r`. Il sandbox di Claude Code applica gli stessi divieti a ogni comando, a livello di sistema. Il prezzo: la rete dei comandi passa da un elenco di siti consentiti, che parte vuoto, e Claude chiede ogni sito nuovo. `init` lo propone, spento di predefinito.
 
 ## La seconda app
 
@@ -100,7 +108,7 @@ Claude Personal seconda app, dati e scheda Code propri
 - Il login passa dal browser: prima esci da claude.ai e tieni chiusa l'altra app.
 - `CLAUDE_CONFIG_DIR` vale solo all'avvio: dopo un cambio chiudi l'app con ⌘Q.
 - Le due app hanno lo stesso identificativo: apri sempre dai launcher, non dalla copia fissata nel Dock.
-- I divieti fermano gli strumenti file di Claude Code, non i comandi Bash.
+- I divieti non fermano script e `grep -r`: per quelli serve il sandbox.
 - Restano in comune il programma `claude`, la chiave nel Portachiavi, log e cache dell'app. Per un muro totale serve un secondo utente macOS.
 
 ## Test

@@ -16,7 +16,7 @@ setopt extended_glob null_glob pipe_fail
 # CLAUDE_CONFIG_DIR ereditata manderebbe a B i comandi pensati per A.
 unset CLAUDE_CONFIG_DIR
 
-DC_VERSION=1.2.0
+DC_VERSION=1.3.0
 DC_HOME_CFG=${DC_CONFIG_HOME:-$HOME/.config/double-claude}
 DC_CONF=$DC_HOME_CFG/config
 SELF=${0:A}
@@ -74,6 +74,8 @@ defaults() {
   DC_B_DENY_EXTRA=()
   DC_MODULES=(shell move mcp deny app)
   DC_LAUNCHER_HIDE=0       # 1 = launcher fuori dal Dock (LSUIElement), ma non si possono fissare
+  DC_SANDBOX=0             # 1 = sandbox di Claude Code per i comandi Bash dei due profili
+  DC_KEEP_BACKUPS=5        # quanti backup tenere
   DC_APP_SRC=${DC_APP:-/Applications/Claude.app}
   unset DC_B_CMD DC_B_APP DC_B_CFG DC_B_DATA DC_CLONE
 }
@@ -122,6 +124,7 @@ save_conf() {
     print -r "DC_B_DENY_EXTRA=(${(@q)DC_B_DENY_EXTRA})"
     print -r "DC_MODULES=(${(@q)DC_MODULES})"
     print -r "DC_LAUNCHER_HIDE=${(q)DC_LAUNCHER_HIDE}       # 1 = launcher fuori dal Dock"
+    print -r "DC_SANDBOX=${(q)DC_SANDBOX}             # 1 = sandbox per i comandi Bash dei due profili"
   } > "$DC_CONF"
 }
 
@@ -130,7 +133,7 @@ save_conf() {
 engine() { # engine COMANDO   (input dalle variabili DC_*)
   local src; src=$(engine_src)
   local -x DC_CMD=$1 DC_ADIRS=${(pj:\n:)DC_A_DIRS} DC_BDIRS=${(pj:\n:)DC_B_DIRS} DC_BCFG=$DC_B_CFG
-  local -x DC_ADATA=$DC_A_DATA DC_BDATA=$DC_B_DATA DC_B3P=$DC_B_3P
+  local -x DC_ADATA=$DC_A_DATA DC_BDATA=$DC_B_DATA DC_B3P=$DC_B_3P DC_STATE=$DC_HOME_CFG/state.json
   if [[ ${DC_JS_RUNTIME:-} == node ]]; then node - <<< "$src"
   else osascript -l JavaScript <<< "$src"; fi
 }
@@ -177,10 +180,12 @@ function main() {
   var enc = function (p) { return p.replace(/[^A-Za-z0-9]/g, '-'); };
   var inDirs = function (ds, p) { return ds.some(function (z) { return p === z || p.indexOf(z + '/') === 0; }); };
   var nameInDirs = function (ds, n) { return ds.some(function (z) { var e = enc(z); return n === e || n.indexOf(e + '-') === 0; }); };
-  // Una chat è di B se è nelle cartelle di B, oppure se è fuori da quelle di A quando solo A ne ha.
+  // Una chat aperta dentro i dati di un'app (le cartelle di lavoro della scheda Code) è di quell'app, sempre.
+  // Altrimenti è di B se è nelle cartelle di B, oppure se è fuori da quelle di A quando solo A ne ha.
+  var adata = [io.env('DC_ADATA')].filter(Boolean), bdata = [io.env('DC_BDATA')].filter(Boolean);
   var onlyA = adirs.length > 0 && bdirs.length === 0;
-  var pathToB = function (p) { return inDirs(bdirs, p) ? true : inDirs(adirs, p) ? false : onlyA; };
-  var nameToB = function (n) { return nameInDirs(bdirs, n) ? true : nameInDirs(adirs, n) ? false : onlyA; };
+  var pathToB = function (p) { return inDirs(bdata, p) ? true : inDirs(adata, p) ? false : inDirs(bdirs, p) ? true : inDirs(adirs, p) ? false : onlyA; };
+  var nameToB = function (n) { return nameInDirs(bdata, n) ? true : nameInDirs(adata, n) ? false : nameInDirs(bdirs, n) ? true : nameInDirs(adirs, n) ? false : onlyA; };
   var tilde = function (p) { return p === HOME ? '~' : p.indexOf(HOME + '/') === 0 ? '~' + p.slice(HOME.length) : p; };
   var json = function (p) { var t = io.read(p); if (!t.trim()) return null; try { return JSON.parse(t); } catch (e) { return undefined; } };
   var lines = function (s) { return s.split('\n').filter(function (l) { return l.trim(); }); };
@@ -219,10 +224,8 @@ function main() {
   }
   function appAccount(dir) { var j = json(dir + '/config.json'); return (j && j.lastKnownAccountUuid) || ''; }
 
-  function denyOf(p) { var j = json(p); return (j && j.permissions && j.permissions.deny) || []; }
-
   if (cmd === 'scan') {
-    var ja = json(AJ), jb = json(BJ), r = !adirs.length && !bdirs.length ? { chats: [], move: [], reg: [] } : classify();
+    var ja = json(AJ), jb = json(BJ), r = classify();
     var email = function (j) { return (j && j.oauthAccount && j.oauthAccount.emailAddress) || ''; };
     return [
       'json_a=' + (ja === undefined ? 'broken' : ja ? 'ok' : 'missing'),
@@ -249,6 +252,8 @@ function main() {
   if (cmd === 'move') {
     var dry = io.env('DC_DRY') !== '0', m = classify(), out = [];
     if (m.ja === undefined) return 'ERRORE: ~/.claude.json non è un JSON valido. Non tocco niente.';
+    var jb = json(BJ);
+    if (jb === undefined) return 'ERRORE: ' + tilde(BJ) + ' non è un JSON valido. Non tocco niente.';
     out.push(dry ? 'Prova: non cambia niente.' : 'Sposto in ' + tilde(B) + ':');
     m.chats.forEach(function (c) {
       out.push('  chat        ' + (c.cwd ? tilde(c.cwd) : c.name));
@@ -269,7 +274,7 @@ function main() {
       if (io.exists(src)) out.push('    ! alcuni file esistono già in B e sono rimasti in A');
     });
     out.push('  cronologia  ' + m.move.length + ' righe passano a B, ' + m.keep.length + ' restano in A');
-    m.reg.forEach(function (k) { out.push('  registro    ' + tilde(k)); });
+    m.reg.forEach(function (k) { out.push('  registro    ' + tilde(k) + '  ' + (dry ? 'passa a B' : 'spostato in B') + ' con permessi e server MCP del progetto'); });
     if (!dry) {
       if (m.move.length) {
         io.mkdirp(B);
@@ -277,7 +282,15 @@ function main() {
         io.write(B + '/history.jsonl', old + m.move.join('\n') + '\n');
         io.write(A + '/history.jsonl', m.keep.length ? m.keep.join('\n') + '\n' : '');
       }
-      if (m.reg.length) { m.reg.forEach(function (k) { delete m.ja.projects[k]; }); io.write(AJ, JSON.stringify(m.ja, null, 2)); }
+      if (m.reg.length) {
+        // prima B, poi A: se la scrittura in B non riesce, A resta com'era
+        jb = jb || {}; jb.projects = jb.projects || {};
+        m.reg.forEach(function (k) { if (!jb.projects[k]) jb.projects[k] = m.ja.projects[k]; });
+        io.mkdirp(B);
+        if (!io.write(BJ, JSON.stringify(jb, null, 2))) return 'ERRORE: non riesco a scrivere ' + tilde(BJ) + '. Il registro di A non è cambiato.';
+        m.reg.forEach(function (k) { delete m.ja.projects[k]; });
+        io.write(AJ, JSON.stringify(m.ja, null, 2));
+      }
     }
     out.push('', (dry ? 'Da spostare: ' : 'Spostati: ') + m.chats.length + ' chat, ' + m.move.length + ' righe di cronologia, ' + m.reg.length + ' voci di registro.');
     return out.join('\n');
@@ -288,19 +301,47 @@ function main() {
     return s ? JSON.stringify(s) : '';
   }
 
-  if (cmd === 'deny-missing' || cmd === 'deny') {
-    var file = io.env('DC_FILE'), rules = lines(io.env('DC_RULES'));
+  // Impostazioni di un profilo: divieti, cartelle di lavoro, blocco delle letture, sandbox.
+  // In state.json Double Claude ricorda cosa ha scritto in ogni file: toglie solo quello, mai le regole dell'utente.
+  if (cmd === 'settings-check' || cmd === 'settings') {
+    var file = io.env('DC_FILE'), STATE = io.env('DC_STATE');
+    var wantDeny = lines(io.env('DC_RULES')), wantDirs = lines(io.env('DC_DIRS'));
+    var wantBlock = io.env('DC_BLOCK') === '1', wantSandbox = io.env('DC_SANDBOX') === '1';
     var cur = json(file);
-    if (cur === undefined) return 'ERRORE: ' + tilde(file) + ' non è un JSON valido.';
-    var have = denyOf(file), miss = rules.filter(function (x) { return have.indexOf(x) < 0; });
-    if (cmd === 'deny-missing') return String(miss.length);
+    if (cur === undefined) return 'error=' + tilde(file) + ' non è un JSON valido';
     cur = cur || {};
+    var perm = cur.permissions || {}, deny = perm.deny || [], dirs = perm.additionalDirectories || [];
+    var sb = cur.sandbox || {};
+    var state = json(STATE) || {}, prev = state[file] || {};
+    var pDeny = prev.deny || [], pDirs = prev.dirs || [];
+    var has = function (arr) { return function (x) { return arr.indexOf(x) >= 0; }; }, not = function (f) { return function (x) { return !f(x); }; };
+    if (cmd === 'settings-check') {
+      return ['deny_missing=' + wantDeny.filter(not(has(deny))).length,
+              'deny_stale=' + pDeny.filter(not(has(wantDeny))).filter(has(deny)).length,
+              'dirs_missing=' + wantDirs.filter(not(has(dirs))).length,
+              'block=' + (perm.blockReadsOutsideWorkingDirectories === true ? 1 : 0),
+              'block_ours=' + (prev.block ? 1 : 0),
+              'sandbox=' + (sb.enabled === true ? 1 : 0),
+              'sandbox_ours=' + (prev.sandbox ? 1 : 0)].join('\n');
+    }
+    var staleDeny = pDeny.filter(not(has(wantDeny))), staleDirs = pDirs.filter(not(has(wantDirs)));
+    var addDeny = wantDeny.filter(not(has(deny))), addDirs = wantDirs.filter(not(has(dirs)));
+    var next = { deny: pDeny.filter(has(wantDeny)).concat(addDeny), dirs: pDirs.filter(has(wantDirs)).concat(addDirs), block: !!prev.block, sandbox: !!prev.sandbox };
+    perm.deny = deny.filter(not(has(staleDeny))).concat(addDeny);
+    perm.additionalDirectories = dirs.filter(not(has(staleDirs))).concat(addDirs);
+    if (!perm.additionalDirectories.length) delete perm.additionalDirectories;
+    if (wantBlock && perm.blockReadsOutsideWorkingDirectories !== true) { perm.blockReadsOutsideWorkingDirectories = true; next.block = true; }
+    if (!wantBlock && prev.block) { delete perm.blockReadsOutsideWorkingDirectories; next.block = false; }
+    if (wantSandbox && sb.enabled !== true) { sb.enabled = true; cur.sandbox = sb; next.sandbox = true; }
+    if (!wantSandbox && prev.sandbox) { delete sb.enabled; if (Object.keys(sb).length) cur.sandbox = sb; else delete cur.sandbox; next.sandbox = false; }
+    cur.permissions = perm;
     if (io.exists(file) && !io.exists(file + '.bak')) io.cp(file, file + '.bak');
-    cur.permissions = cur.permissions || {};
-    cur.permissions.deny = have.concat(miss);
     io.mkdirp(file.replace(/\/[^\/]*$/, ''));
     io.write(file, JSON.stringify(cur, null, 2));
-    return String(miss.length);
+    state[file] = next;
+    io.mkdirp(STATE.replace(/\/[^\/]*$/, ''));
+    io.write(STATE, JSON.stringify(state, null, 2));
+    return ['added=' + addDeny.length, 'removed=' + staleDeny.length, 'dirs=' + addDirs.length, 'dirs_removed=' + staleDirs.length].join('\n');
   }
   return 'comando sconosciuto: ' + cmd;
 }
@@ -329,7 +370,18 @@ rules_b() { # cosa B non deve toccare
   for d in $DC_A_DIRS; do rw "$d"; done
   for d in $DC_B_DENY_EXTRA; do rw "$d"; done
 }
-deny_missing() { DC_FILE=$1 DC_RULES=$2 engine deny-missing 2>/dev/null; }
+# Le impostazioni che Double Claude scrive in un profilo: i divieti, le cartelle dedicate come cartelle di lavoro,
+# il blocco delle letture fuori da quelle cartelle (solo se il profilo ne ha) e, se scelto, il sandbox.
+BLOCK_MIN=2.1.257   # prima versione di Claude Code con permissions.blockReadsOutsideWorkingDirectories
+settings_of() { # settings_of a|b settings|settings-check
+  local file rules; local -a ds
+  if [[ $1 == a ]]; then file=$DC_A_CFG/settings.json rules=$(rules_a) ds=($DC_A_DIRS)
+  else file=$DC_B_CFG/settings.json rules=$(rules_b) ds=($DC_B_DIRS); fi
+  DC_FILE=$file DC_RULES=$rules DC_DIRS=${(pj:\n:)ds} DC_BLOCK=$(( $#ds ? 1 : 0 )) DC_SANDBOX=$DC_SANDBOX engine $2 2>/dev/null
+}
+kv() { typeset -gA KV; KV=(); local k v; while IFS='=' read -r k v; do [[ -n $k ]] && KV[$k]=$v; done <<< "$1"; }
+claude_version() { [[ -n $CLAUDE_BIN ]] && "$CLAUDE_BIN" --version 2>/dev/null | grep -oE '^[0-9]+(\.[0-9]+)+' | head -1; }
+block_too_old() { local v; v=$(claude_version); [[ -n $v && $(vercmp "$v" $BLOCK_MIN) == behind ]] && print -r -- "$v"; }
 
 # ---------------------------------------------------------------- blocco per ~/.zshrc
 zsh_block() {
@@ -476,16 +528,25 @@ mk_launcher() { # mk_launcher "Nome app" a|b
 
 # ---------------------------------------------------------------- backup
 BK=''
-do_backup() {
+cpc() { # copia APFS istantanea (cp -c), se non si può una copia normale
+  if [[ -d $1 ]]; then cp -cRp "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -Rp "$1" "$2"; }
+  else cp -cp "$1" "$2" 2>/dev/null || cp -p "$1" "$2"; fi
+}
+do_backup() { # do_backup [backup da non cancellare]
   local base=$DC_HOME_CFG/backups/$(date +%Y%m%d-%H%M%S) i=1
   BK=$base.noindex
   while [[ -e $BK ]]; do BK=${base}_$((i++)).noindex; done   # due backup nello stesso secondo: _1 si ordina dopo
   mkdir -p "$BK"
-  [[ -d $DC_A_CFG ]] && cp -Rp "$DC_A_CFG" "$BK/claude"
-  [[ -f $DC_A_JSON ]] && cp -p "$DC_A_JSON" "$BK/claude.json"
-  [[ -f $HOME/.zshrc ]] && cp -p "$HOME/.zshrc" "$BK/zshrc"
-  [[ -d $DC_B_CFG ]] && cp -Rp "$DC_B_CFG" "$BK/profile-b"
-  ok "backup in $(tilde $BK) ($(du -sh "$BK" 2>/dev/null | cut -f1 | tr -d " "))"
+  [[ -d $DC_A_CFG ]] && cpc "$DC_A_CFG" "$BK/claude"
+  [[ -f $DC_A_JSON ]] && cpc "$DC_A_JSON" "$BK/claude.json"
+  [[ -f $HOME/.zshrc ]] && cpc "$HOME/.zshrc" "$BK/zshrc"
+  [[ -d $DC_B_CFG ]] && cpc "$DC_B_CFG" "$BK/profile-b"
+  [[ -f $DC_HOME_CFG/state.json ]] && cpc "$DC_HOME_CFG/state.json" "$BK/state.json"
+  ok "backup in $(tilde $BK)"
+  local -a all=($DC_HOME_CFG/backups/*.noindex(N/nOn)) old=(); local b n=0
+  for b in $all; do (( ++n > DC_KEEP_BACKUPS )) && [[ $b != ${1:-} ]] && old+=("$b"); done
+  if (( $#old )); then rm -rf "${old[@]}"; say "    ${_d}tolti $#old backup vecchi: ne tengo $DC_KEEP_BACKUPS${_r}"; fi
+  return 0
 }
 
 # ================================================================ comandi
@@ -602,10 +663,18 @@ cmd_init() {
     if [[ $DC_START == one ]]; then confirm "Alcune chat fatte finora sono di $DC_B_LABEL e vanno spostate?" N && DC_MODULES+=(move)
     else confirm "Sposto in $DC_B_LABEL le chat e la cronologia che gli appartengono?" S && DC_MODULES+=(move); fi
   elif [[ $DC_START != one ]]; then
-    say "   ${_d}Senza cartelle dedicate non so quali chat sono di $DC_B_LABEL: restano dove sono.${_r}"
+    say "   ${_d}Senza cartelle dedicate riconosco solo le chat fatte nella scheda Code di $DC_B_APP: le altre restano dove sono.${_r}"
+    confirm "Sposto in $DC_B_LABEL le chat della scheda Code di $DC_B_APP finite in $DC_A_LABEL?" S && DC_MODULES+=(move)
   fi
   (( $#DC_MCP_MOVE )) && DC_MODULES+=(mcp)
-  confirm "Aggiungo i divieti, così nessuno dei due legge i dati dell'altro?" S && DC_MODULES+=(deny)
+  if confirm "Aggiungo i divieti, così nessuno dei due legge i dati dell'altro?" S; then
+    DC_MODULES+=(deny)
+    (( $#DC_A_DIRS )) && say "   ${_d}$DC_A_LABEL leggerà file solo dalle sue cartelle.${_r}"
+    (( $#DC_B_DIRS )) && say "   ${_d}$DC_B_LABEL leggerà file solo dalle sue cartelle.${_r}"
+    say "   ${_d}I divieti valgono per gli strumenti file e per comandi come cat e sed, non per script o grep -r.${_r}"
+    say "   ${_d}Il sandbox li applica a tutti i comandi, ma la rete passa da un elenco di siti: Claude ti chiede ogni sito nuovo.${_r}"
+    if confirm "Attivo anche il sandbox?" $( (( DC_SANDBOX )) && print S || print N); then DC_SANDBOX=1; else DC_SANDBOX=0; fi
+  fi
   if is_mac && [[ -d $DC_APP_SRC ]]; then
     if confirm "Creo una seconda app Desktop per $DC_B_LABEL ($DC_B_APP)?" S; then
       DC_MODULES+=(app)
@@ -654,14 +723,17 @@ cmd_doctor() {
       (( $#ds )) || { say "    ${_d}$lbl: nessuna, lavora ovunque tranne nelle cartelle dell'altro${_r}"; continue; }
       for d in $ds; do [[ -d $d ]] && ok "$lbl lavora solo in $(tilde $d)" || { ko "manca la cartella $(tilde $d) di $lbl"; hint "double-claude apply shell la crea"; }; done
     done
-    h2 "Chat e cronologia"
-    local c=${S[chats_b]} h=${S[history_b]} r=${S[registry_b]}
-    if (( c + h + r == 0 )); then ok "in $DC_A_LABEL non c'è niente di $DC_B_LABEL"
-    else ko "in $DC_A_LABEL ci sono dati di $DC_B_LABEL: $c chat, $h righe di cronologia, $r voci di registro"; hint "double-claude apply move"; fi
   else
     h2 "Cartelle dedicate"
     say "    ${_d}Nessuna: claude e $DC_B_CMD funzionano in ogni cartella. Per sceglierne una: double-claude init.${_r}"
   fi
+
+  h2 "Chat e cronologia"
+  local c=${S[chats_b]} h=${S[history_b]} r=${S[registry_b]}
+  if (( c + h + r == 0 )); then
+    if has_dirs; then ok "in $DC_A_LABEL non c'è niente di $DC_B_LABEL"
+    else ok "in $DC_A_LABEL non ci sono chat della scheda Code di $DC_B_APP"; fi
+  else ko "in $DC_A_LABEL ci sono dati di $DC_B_LABEL: $c chat, $h righe di cronologia, $r voci di registro"; hint "double-claude apply move"; fi
 
   if (( $#DC_MCP_MOVE )) || [[ -n ${S[mcp_a]}${S[mcp_b]} ]]; then
     h2 "Server MCP"
@@ -674,11 +746,27 @@ cmd_doctor() {
   fi
 
   if has_mod deny; then
-    h2 "Divieti"
-    local ma mb
-    ma=$(deny_missing "$DC_A_CFG/settings.json" "$(rules_a)"); mb=$(deny_missing "$DC_B_CFG/settings.json" "$(rules_b)")
-    [[ $ma == 0 ]] && ok "$DC_A_LABEL non può leggere i dati di $DC_B_LABEL" || { ko "$DC_A_LABEL: mancano $ma divieti"; hint "double-claude apply deny"; }
-    [[ $mb == 0 ]] && ok "$DC_B_LABEL non può leggere i dati di $DC_A_LABEL" || { ko "$DC_B_LABEL: mancano $mb divieti"; hint "double-claude apply deny"; }
+    h2 "Divieti e letture"
+    local x lbl other; local -a ds
+    for x in a b; do
+      if [[ $x == a ]]; then lbl=$DC_A_LABEL other=$DC_B_LABEL ds=($DC_A_DIRS); else lbl=$DC_B_LABEL other=$DC_A_LABEL ds=($DC_B_DIRS); fi
+      kv "$(settings_of $x settings-check)"
+      if [[ -n ${KV[error]:-} ]]; then ko "$lbl: ${KV[error]}"; continue; fi
+      if (( KV[deny_missing] + KV[deny_stale] == 0 )); then ok "$lbl non può leggere i dati di $other"
+      else
+        (( KV[deny_missing] )) && ko "$lbl: mancano ${KV[deny_missing]} divieti"
+        (( KV[deny_stale] )) && ko "$lbl: ${KV[deny_stale]} divieti di una configurazione precedente da togliere"
+        hint "double-claude apply deny"
+      fi
+      if (( $#ds )); then
+        if (( KV[block] && ! KV[dirs_missing] )); then ok "$lbl legge file solo da: $(dirs_of $ds)"
+        else ko "$lbl può leggere file fuori dalle sue cartelle"; hint "double-claude apply deny"; fi
+      elif (( KV[block_ours] )); then ko "$lbl ha ancora il blocco delle letture di una configurazione precedente"; hint "double-claude apply deny"; fi
+      if (( DC_SANDBOX )); then (( KV[sandbox] )) && ok "$lbl: sandbox attivo" || { ko "$lbl: sandbox non attivo"; hint "double-claude apply deny"; }
+      elif (( KV[sandbox_ours] )); then ko "$lbl: sandbox rimasto attivo da una configurazione precedente"; hint "double-claude apply deny"; fi
+    done
+    local old; old=$(block_too_old)
+    if has_dirs && [[ -n $old ]]; then ko "Claude Code $old non conosce il blocco delle letture (serve $BLOCK_MIN)"; hint "aggiorna con: claude update"; fi
   fi
 
   if has_mod app; then
@@ -748,9 +836,12 @@ cmd_plan() {
     say "  Da $DC_A_LABEL a $DC_B_LABEL: ${DC_MCP_MOVE[*]}"
   fi
   if has_mod deny; then
-    h2 "deny · divieti"
+    h2 "deny · divieti e letture"
     say "  $DC_A_LABEL non tocca:"; rules_a | sed 's/^/    /'
     say "  $DC_B_LABEL non tocca:"; rules_b | sed 's/^/    /'
+    (( $#DC_A_DIRS )) && say "  $DC_A_LABEL legge file solo da: $(dirs_of $DC_A_DIRS)"
+    (( $#DC_B_DIRS )) && say "  $DC_B_LABEL legge file solo da: $(dirs_of $DC_B_DIRS)"
+    (( DC_SANDBOX )) && say "  Sandbox per i comandi Bash dei due profili"
   fi
   if has_mod app; then
     h2 "app · seconda app Desktop"
@@ -787,7 +878,7 @@ apply_shell() {
 
 apply_move() {
   h2 "move · chat e cronologia"
-  has_dirs || { warn "senza cartelle dedicate non so quali chat sono di $DC_B_LABEL: salto"; return 0; }
+  has_dirs || say "  ${_d}Senza cartelle dedicate sposto solo le chat della scheda Code di $DC_B_APP.${_r}"
   local r; r=$(running)
   if [[ -n $r ]]; then
     warn "Claude è aperto e riscrive i suoi file mentre gira:"
@@ -820,11 +911,20 @@ apply_mcp() {
 }
 
 apply_deny() {
-  h2 "deny · divieti"
-  local n
-  n=$(DC_FILE=$DC_A_CFG/settings.json DC_RULES="$(rules_a)" engine deny); ok "$DC_A_LABEL: $n divieti aggiunti"
-  n=$(DC_FILE=$DC_B_CFG/settings.json DC_RULES="$(rules_b)" engine deny); ok "$DC_B_LABEL: $n divieti aggiunti"
-  hint "i divieti fermano gli strumenti file di Claude Code, non i comandi Bash (valuta /sandbox)"
+  h2 "deny · divieti e letture"
+  local x lbl msg; local -a ds
+  for x in a b; do
+    if [[ $x == a ]]; then lbl=$DC_A_LABEL ds=($DC_A_DIRS); else lbl=$DC_B_LABEL ds=($DC_B_DIRS); fi
+    kv "$(settings_of $x settings)"
+    if [[ -n ${KV[error]:-} ]]; then ko "$lbl: ${KV[error]}"; continue; fi
+    msg="$lbl: ${KV[added]} divieti aggiunti"; (( KV[removed] )) && msg+=", ${KV[removed]} tolti perché non servono più"
+    ok "$msg"
+    (( $#ds )) && ok "$lbl legge file solo da: $(dirs_of $ds)"
+  done
+  local old; old=$(block_too_old)
+  if has_dirs && [[ -n $old ]]; then warn "Claude Code $old non conosce ancora il blocco delle letture: aggiorna con claude update"; fi
+  if (( DC_SANDBOX )); then ok "sandbox attivo per i comandi Bash dei due profili"; hint "la rete dei comandi passa da un elenco di siti: Claude ti chiede ogni sito nuovo"
+  else hint "i divieti valgono per gli strumenti file e per cat, sed e simili, non per script o grep -r: per quelli c'è il sandbox (double-claude init)"; fi
 }
 
 apply_app() {
@@ -904,11 +1004,12 @@ cmd_restore() {
   local src=${all[$n]}; [[ -d $src ]] || die "scelta non valida"
   [[ -z $(running) ]] || die "chiudi prima le app Claude e i Terminali dove gira claude."
   confirm "Riporto tutto a ${src:t:r}? Prima salvo lo stato attuale." S || return 0
-  do_backup
-  [[ -d $src/claude ]]      && { rm -rf "$DC_A_CFG"; cp -Rp "$src/claude" "$DC_A_CFG"; ok "~/.claude"; }
-  [[ -f $src/claude.json ]] && { cp -p "$src/claude.json" "$DC_A_JSON"; ok "~/.claude.json"; }
+  do_backup "$src"
+  [[ -d $src/claude ]]      && { rm -rf "$DC_A_CFG"; cpc "$src/claude" "$DC_A_CFG"; ok "~/.claude"; }
+  [[ -f $src/claude.json ]] && { rm -f "$DC_A_JSON"; cpc "$src/claude.json" "$DC_A_JSON"; ok "~/.claude.json"; }
   [[ -f $src/zshrc ]]       && { cp -p "$src/zshrc" "$HOME/.zshrc"; ok "~/.zshrc"; }
-  if [[ -d $src/profile-b ]]; then rm -rf "$DC_B_CFG"; cp -Rp "$src/profile-b" "$DC_B_CFG"; ok "$(tilde $DC_B_CFG)"
+  if [[ -f $src/state.json ]]; then cp -p "$src/state.json" "$DC_HOME_CFG/state.json"; else rm -f "$DC_HOME_CFG/state.json"; fi
+  if [[ -d $src/profile-b ]]; then rm -rf "$DC_B_CFG"; cpc "$src/profile-b" "$DC_B_CFG"; ok "$(tilde $DC_B_CFG)"
   elif [[ -d $DC_B_CFG ]]; then rm -rf "$DC_B_CFG"; ok "$(tilde $DC_B_CFG) tolta: in quel backup non esisteva ancora"; fi
   hint "lo stato di prima è nel backup appena fatto: $(tilde $BK)"
 }
