@@ -29,7 +29,7 @@ export PATH=$T/bin:$PATH DC_SKIP_RUNNING_CHECK=1 NO_COLOR=1
 unset CLAUDE_CONFIG_DIR       # mai la config vera di chi lancia i test
 export DC_APP=$T/nessuna-app   # i test non devono mai vedere la Claude.app vera del Mac
 
-# ---------------------------------------------------------------- scenario 1: due account mescolati, zona di A
+# ---------------------------------------------------------------- scenario 1: due account mescolati, cartella dedicata ad A
 print "Scenario 1: due account mescolati"
 export HOME=$T/alex; H=$HOME
 mkdir -p $H/.claude/{projects,file-history} $H/Documents/{work/app,side}
@@ -46,9 +46,9 @@ print '{"permissions":{"allow":["Bash(ls:*)"]}}' > $H/.claude/settings.json
 print -l 'export X=1' 'alias claude-personal="CLAUDE_CONFIG_DIR=~/.claude-personal claude"' > $H/.zshrc
 cd $H
 
-printf '2\nwork\npersonal\n2\n~/Documents/work\nnotes\ns\ns\n' | $CS init >/dev/null
+printf '2\nwork\npersonal\n3\n~/Documents/work\nnotes\ns\ns\n' | $CS init >/dev/null
 check "init salva la config" "[[ -f $H/.config/double-claude/config ]]"
-check "zona di A e moduli scelti" "grep -q 'DC_ZONE_OWNER=a' $H/.config/double-claude/config && grep -q 'DC_MODULES=(shell move mcp deny)' $H/.config/double-claude/config"
+check "cartella di A e moduli scelti" "grep -q 'DC_A_DIRS=($H/Documents/work)' $H/.config/double-claude/config && grep -q 'DC_B_DIRS=()' $H/.config/double-claude/config && grep -q 'DC_MODULES=(shell move mcp deny)' $H/.config/double-claude/config"
 check "nome app con spazio salvato tra virgolette" "grep -q 'DC_B_APP=Claude\\\\ Personal' $H/.config/double-claude/config"
 out=$($CS doctor)
 check "doctor trova 3 chat di B in A (work-old riconosciuta dal cwd)" "[[ \$out == *'3 chat, 2 righe di cronologia, 2 voci di registro'* ]]"
@@ -61,16 +61,16 @@ check "cronologia divisa" "[[ \$(wc -l < $H/.claude-personal/history.jsonl) -eq 
 check "registro di A ripulito" "node -e \"process.exit(Object.keys(require('$H/.claude.json').projects).length===2?0:1)\""
 check "MCP notes spostato in B" "node -e \"j=require('$H/.claude-personal/.claude.json');k=require('$H/.claude.json');process.exit(j.mcpServers.notes&&!k.mcpServers.notes?0:1)\""
 check "divieti scritti e regole utente conservate" "grep -q 'Read(~/.claude-personal/\*\*)' $H/.claude/settings.json && grep -q 'Bash(ls:\*)' $H/.claude/settings.json"
-check "divieti di B sulla zona di lavoro" "grep -q 'Read(~/Documents/work/\*\*)' $H/.claude-personal/settings.json"
+check "divieti di B sulla cartella di lavoro" "grep -q 'Read(~/Documents/work/\*\*)' $H/.claude-personal/settings.json"
 $CS --yes apply shell >/dev/null
 check "blocco zshrc idempotente" "[[ \$(grep -c '>>> double-claude' $H/.zshrc) -eq 1 ]]"
 sed -i.bak '/^alias/d' $H/.zshrc
 r1=$(cd $H/Documents/work/app && zsh -c "source $H/.zshrc; claude-personal x" 2>&1)
-check "B rifiutato nella zona di A" "[[ \$r1 == *'nella zona work'* ]]"
+check "B rifiutato nella cartella di A" "[[ \$r1 == *'questa cartella è di work'* ]]"
 r2=$(cd $H/Documents/side && zsh -c "source $H/.zshrc; claude x" 2>&1)
-check "A rifiutato fuori dalla zona" "[[ \$r2 == *'fuori dalla zona work'* ]]"
+check "A rifiutato fuori dalla sua cartella" "[[ \$r2 == *'lavora solo in ~/Documents/work'* ]]"
 r3=$(cd $H/Documents/side && zsh -c "source $H/.zshrc; claude-personal mcp list" 2>&1)
-check "B usa la sua config fuori zona" "[[ \$r3 == *notes* ]]"
+check "B usa la sua config fuori dalla cartella di A" "[[ \$r3 == *notes* ]]"
 out=$($CS doctor)
 check "doctor dopo apply: resta solo il login di B" "[[ \$out == *'1 cosa da sistemare'* ]]"
 
@@ -79,28 +79,56 @@ print "$n\ns" | $CS restore >/dev/null 2>&1   # il più vecchio
 check "restore al primo backup rimette le chat in A" "[[ \$(ls $H/.claude/projects | wc -l) -eq 5 ]]"
 check "restore toglie la config di B che non esisteva" "[[ ! -d $H/.claude-personal ]]"
 
-# ---------------------------------------------------------------- scenario 2: un solo account, zona di B, risposte da stdin
-print "Scenario 2: un solo account, zona di B"
-export HOME=$T/sam; H=$HOME; mkdir -p $H/Projects/acme; cd $H
+# ---------------------------------------------------------------- scenario 2: un solo account, cartella dedicata a B, risposte da stdin
+print "Scenario 2: un solo account, cartella dedicata a B"
+export HOME=$T/sam; H=$HOME; mkdir -p $H/Projects; cd $H
 print '{"oauthAccount":{"emailAddress":"sam@example.org"},"mcpServers":{}}' > $H/.claude.json
-printf '1\npersonal\nacme\n3\n~/Projects/acme\nn\ns\n' | $CS init >/dev/null
-check "start=one, zona di B" "grep -q 'DC_START=one' $H/.config/double-claude/config && grep -q 'DC_ZONE_OWNER=b' $H/.config/double-claude/config"
+printf '1\npersonal\nacme\n2\n~/Projects/acme\nn\ns\n' | $CS init >/dev/null
+check "start=one, cartella di B" "grep -q 'DC_START=one' $H/.config/double-claude/config && grep -q 'DC_B_DIRS=($H/Projects/acme)' $H/.config/double-claude/config"
 check "move non scelto" "grep -q 'DC_MODULES=(shell deny)' $H/.config/double-claude/config"
 plan=$($CS plan)
-check "claude rifiutato dentro la zona di B" "[[ \$plan == *'claude: questa cartella è nella zona acme'* ]]"
+check "claude rifiutato dentro la cartella di B" "[[ \$plan == *'claude: questa cartella è di acme'* ]]"
+check "plan annuncia la cartella da creare" "[[ \$plan == *'Crea anche le cartelle dedicate: ~/Projects/acme'* ]]"
+out=$($CS --yes apply shell)
+check "login di B dalla sua cartella" "[[ \$out == *'cd ~/Projects/acme && claude-acme'* ]]"
+check "apply crea la cartella di B" "[[ -d $H/Projects/acme ]]"
 
 # ---------------------------------------------------------------- scenario 3: zone saltate
 print "Scenario 3: zone saltate (--yes)"
 export HOME=$T/lee; H=$HOME; mkdir -p $H/Documents/any; cd $H
 print '{"oauthAccount":{"emailAddress":"lee@example.org"}}' > $H/.claude.json
 $CS --yes init >/dev/null
-check "--yes non crea zone" "grep -q 'DC_ZONE_OWNER=none' $H/.config/double-claude/config && grep -q 'DC_ZONE_DIRS=()' $H/.config/double-claude/config"
+check "--yes non sceglie cartelle dedicate" "grep -q 'DC_A_DIRS=()' $H/.config/double-claude/config && grep -q 'DC_B_DIRS=()' $H/.config/double-claude/config"
 check "senza zone lo spostamento non è scelto" "! grep -q 'DC_MODULES=.*move' $H/.config/double-claude/config"
 out=$($CS doctor)
-check "doctor spiega che non ci sono zone" "[[ \$out == *'Nessuna zona'* ]]"
+check "doctor spiega che non ci sono cartelle dedicate" "[[ \$out == *'Nessuna: claude e claude-personal funzionano in ogni cartella'* ]]"
 $CS --yes apply >/dev/null
 r1=$(cd $H/Documents/any && zsh -c "source $H/.zshrc; whence -w claude-personal; whence -w claude" 2>&1)
 check "senza zone: solo la funzione di B, claude resta quello vero" "[[ \$r1 == *'claude-personal: function'* && \$r1 != *'claude: function'* ]]"
+
+# ---------------------------------------------------------------- scenario 3b: una cartella per ciascuno
+print "Scenario 3b: una cartella per ciascuno"
+export HOME=$T/max; H=$HOME; mkdir -p $H/.claude/projects $H/Documents/side; cd $H
+for p in $H/Documents/work/a $H/Documents/personal/b $H/Documents/side; do
+  d=$H/.claude/projects/${p//[^A-Za-z0-9]/-}; mkdir -p $d; print -r -- "{\"cwd\":\"$p\"}" > $d/x.jsonl; done
+print '{"oauthAccount":{"emailAddress":"max@example.org"}}' > $H/.claude.json
+printf '2\nwork\npersonal\n4\n\n\ns\ns\n' | $CS init >/dev/null
+check "due cartelle salvate" "grep -q 'DC_A_DIRS=($H/Documents/work)' $H/.config/double-claude/config && grep -q 'DC_B_DIRS=($H/Documents/personal)' $H/.config/double-claude/config"
+out=$($CS doctor)
+check "doctor: manca la cartella di personal, quella di work c'è dopo apply" "[[ \$out == *'manca la cartella ~/Documents/personal di personal'* ]]"
+check "in A solo la chat dentro la cartella di B è di B" "[[ \$out == *'1 chat'* ]]"
+$CS --yes apply >/dev/null
+check "cartelle create, chat di personal spostata, side resta in A" "[[ -d $H/Documents/work && -d $H/Documents/personal && \$(ls $H/.claude-personal/projects) == *personal-b && \$(ls $H/.claude/projects | wc -l) -eq 2 ]]"
+r1=$(cd $H/Documents/side && zsh -c "source $H/.zshrc; claude x; claude-personal x" 2>&1)
+check "fuori da entrambe: nessuno dei due parte" "[[ \$r1 == *'claude: lavora solo in ~/Documents/work.'* && \$r1 == *'claude-personal: lavora solo in ~/Documents/personal.'* ]]"
+r2=$(cd $H/Documents/personal && zsh -c "source $H/.zshrc; claude x" 2>&1)
+check "claude nella cartella di personal: indica claude-personal" "[[ \$r2 == *'questa cartella è di personal. Qui usa claude-personal'* ]]"
+r3=$(cd $H/Documents/side && zsh -c "source $H/.zshrc; claude mcp list" 2>&1)
+check "comandi di gestione ovunque" "[[ \$r3 != *'lavora solo'* ]]"
+check "divieti incrociati" "grep -q 'Read(~/Documents/personal/\*\*)' $H/.claude/settings.json && grep -q 'Read(~/Documents/work/\*\*)' $H/.claude-personal/settings.json"
+print -l 'DC_A_LABEL=work' 'DC_B_LABEL=personal' 'DC_ZONE_OWNER=b' "DC_ZONE_DIRS=($H/Documents/personal)" 'DC_MODULES=(shell)' > $H/.config/double-claude/config
+plan=$($CS plan)
+check "config della 1.1.0 (zona di B) letta come cartella di B" "[[ \$plan == *'_dc_b=('* && \$plan == *'Documents/personal'* && \$plan == *'claude-personal: lavora solo in ~/Documents/personal. Qui usa claude.'* ]]"
 
 # ---------------------------------------------------------------- scenario 4: app Desktop (strumenti macOS simulati)
 print "Scenario 4: app Desktop"

@@ -5,7 +5,7 @@
 #   1. account       login dal browser, uno alla volta
 #   2. app Desktop   una seconda copia dell'app con --user-data-dir
 #   3. Claude Code   una config propria con CLAUDE_CONFIG_DIR (anche nella scheda Code dell'app)
-#   4. cartelle      zone nel Terminale e divieti Read/Edit
+#   4. cartelle      divieti Read/Edit e, se vuoi, cartelle dedicate a un profilo
 #
 # Uso rapido:  double-claude init  →  double-claude doctor  →  double-claude apply
 # Licenza: MIT. Nessun dato lascia il Mac.
@@ -16,7 +16,7 @@ setopt extended_glob null_glob pipe_fail
 # CLAUDE_CONFIG_DIR ereditata manderebbe a B i comandi pensati per A.
 unset CLAUDE_CONFIG_DIR
 
-DC_VERSION=1.1.0
+DC_VERSION=1.2.0
 DC_HOME_CFG=${DC_CONFIG_HOME:-$HOME/.config/double-claude}
 DC_CONF=$DC_HOME_CFG/config
 SELF=${0:A}
@@ -66,8 +66,9 @@ defaults() {
   DC_A_LABEL=work
   DC_B_LABEL=personal
   DC_A_APP=Claude
-  DC_ZONE_OWNER=none       # a | b | none  (le zone sono facoltative)
-  DC_ZONE_DIRS=()
+  DC_A_DIRS=()             # cartelle dedicate ad A: se ce ne sono, A lavora solo lì (facoltative)
+  DC_B_DIRS=()             # lo stesso per B
+  DC_ZONE_OWNER=none DC_ZONE_DIRS=()   # formato della 1.1.0, letto ancora da load()
   DC_MCP_MOVE=()
   DC_A_DENY_EXTRA=()
   DC_B_DENY_EXTRA=()
@@ -88,7 +89,17 @@ derive() {
   DC_B_3P="$DC_B_DATA-3p"
   CLAUDE_BIN=$(whence -p claude 2>/dev/null)
 }
-load() { defaults; [[ -f $DC_CONF ]] && source "$DC_CONF"; derive; }
+load() {
+  defaults; [[ -f $DC_CONF ]] && source "$DC_CONF"
+  if (( ! $#DC_A_DIRS && ! $#DC_B_DIRS )); then   # config della 1.1.0: una zona con un proprietario
+    [[ $DC_ZONE_OWNER == a ]] && DC_A_DIRS=($DC_ZONE_DIRS)
+    [[ $DC_ZONE_OWNER == b ]] && DC_B_DIRS=($DC_ZONE_DIRS)
+  fi
+  derive
+}
+has_dirs() { (( $#DC_A_DIRS || $#DC_B_DIRS )); }
+dirs_of()  { local d out=(); for d in "$@"; do out+=("$(tilde $d)"); done; print -r -- "${(j:, :)out}"; }
+b_start()  { tilde "${DC_B_DIRS[1]:-$HOME}"; }   # dove B può partire per il login
 need_conf() { [[ -f $DC_CONF ]] || die "nessuna configurazione. Lancia prima: double-claude init"; }
 has_mod() { (( ${DC_MODULES[(Ie)$1]} )); }
 is_mac()  { [[ $OSTYPE == darwin* || -n ${DC_FAKE_MAC:-} ]]; }
@@ -104,8 +115,8 @@ save_conf() {
     print -r "DC_B_APP=${(q)DC_B_APP}"
     print -r "DC_B_CMD=${(q)DC_B_CMD}"
     print -r "DC_B_CFG=${(q)DC_B_CFG}"
-    print -r "DC_ZONE_OWNER=${(q)DC_ZONE_OWNER}         # a | b | none"
-    print -r "DC_ZONE_DIRS=(${(@q)DC_ZONE_DIRS})"
+    print -r "DC_A_DIRS=(${(@q)DC_A_DIRS})            # cartelle dedicate ad A (vuoto = nessuna)"
+    print -r "DC_B_DIRS=(${(@q)DC_B_DIRS})            # cartelle dedicate a B (vuoto = nessuna)"
     print -r "DC_MCP_MOVE=(${(@q)DC_MCP_MOVE})"
     print -r "DC_A_DENY_EXTRA=(${(@q)DC_A_DENY_EXTRA})"
     print -r "DC_B_DENY_EXTRA=(${(@q)DC_B_DENY_EXTRA})"
@@ -118,7 +129,7 @@ save_conf() {
 # Il motore è JavaScript: su macOS gira con JXA (osascript), nei test con node.
 engine() { # engine COMANDO   (input dalle variabili DC_*)
   local src; src=$(engine_src)
-  local -x DC_CMD=$1 DC_ZONE=${(pj:\n:)DC_ZONE_DIRS} DC_OWNER=$DC_ZONE_OWNER DC_BCFG=$DC_B_CFG
+  local -x DC_CMD=$1 DC_ADIRS=${(pj:\n:)DC_A_DIRS} DC_BDIRS=${(pj:\n:)DC_B_DIRS} DC_BCFG=$DC_B_CFG
   local -x DC_ADATA=$DC_A_DATA DC_BDATA=$DC_B_DATA DC_B3P=$DC_B_3P
   if [[ ${DC_JS_RUNTIME:-} == node ]]; then node - <<< "$src"
   else osascript -l JavaScript <<< "$src"; fi
@@ -162,12 +173,14 @@ var io = IS_JXA ? (function () {
 function main() {
   var HOME = io.env('HOME'), cmd = io.env('DC_CMD');
   var A = HOME + '/.claude', AJ = HOME + '/.claude.json', B = io.env('DC_BCFG'), BJ = B + '/.claude.json';
-  var zone = io.env('DC_ZONE').split('\n').filter(Boolean), owner = io.env('DC_OWNER') || 'none';
+  var adirs = io.env('DC_ADIRS').split('\n').filter(Boolean), bdirs = io.env('DC_BDIRS').split('\n').filter(Boolean);
   var enc = function (p) { return p.replace(/[^A-Za-z0-9]/g, '-'); };
-  var inZone = function (p) { return zone.some(function (z) { return p === z || p.indexOf(z + '/') === 0; }); };
-  var nameInZone = function (n) { return zone.some(function (z) { var e = enc(z); return n === e || n.indexOf(e + '-') === 0; }); };
-  var pathToB = function (p) { return owner === 'a' ? !inZone(p) : owner === 'b' ? inZone(p) : false; };
-  var nameToB = function (n) { return owner === 'a' ? !nameInZone(n) : owner === 'b' ? nameInZone(n) : false; };
+  var inDirs = function (ds, p) { return ds.some(function (z) { return p === z || p.indexOf(z + '/') === 0; }); };
+  var nameInDirs = function (ds, n) { return ds.some(function (z) { var e = enc(z); return n === e || n.indexOf(e + '-') === 0; }); };
+  // Una chat è di B se è nelle cartelle di B, oppure se è fuori da quelle di A quando solo A ne ha.
+  var onlyA = adirs.length > 0 && bdirs.length === 0;
+  var pathToB = function (p) { return inDirs(bdirs, p) ? true : inDirs(adirs, p) ? false : onlyA; };
+  var nameToB = function (n) { return nameInDirs(bdirs, n) ? true : nameInDirs(adirs, n) ? false : onlyA; };
   var tilde = function (p) { return p === HOME ? '~' : p.indexOf(HOME + '/') === 0 ? '~' + p.slice(HOME.length) : p; };
   var json = function (p) { var t = io.read(p); if (!t.trim()) return null; try { return JSON.parse(t); } catch (e) { return undefined; } };
   var lines = function (s) { return s.split('\n').filter(function (l) { return l.trim(); }); };
@@ -209,7 +222,7 @@ function main() {
   function denyOf(p) { var j = json(p); return (j && j.permissions && j.permissions.deny) || []; }
 
   if (cmd === 'scan') {
-    var ja = json(AJ), jb = json(BJ), r = owner === 'none' ? { chats: [], move: [], reg: [] } : classify();
+    var ja = json(AJ), jb = json(BJ), r = !adirs.length && !bdirs.length ? { chats: [], move: [], reg: [] } : classify();
     var email = function (j) { return (j && j.oauthAccount && j.oauthAccount.emailAddress) || ''; };
     return [
       'json_a=' + (ja === undefined ? 'broken' : ja ? 'ok' : 'missing'),
@@ -308,12 +321,12 @@ rw()  { local r; r=$(rule_of "$1"); print -r -- "Read($r/**)"; print -r -- "Edit
 rwf() { local r; r=$(rule_of "$1"); print -r -- "Read($r)"; print -r -- "Edit($r)"; }
 rules_a() { # cosa A non deve toccare
   rw "$DC_B_CFG"; rw "$DC_B_DATA"
-  [[ $DC_ZONE_OWNER == b ]] && for d in $DC_ZONE_DIRS; do rw "$d"; done
+  for d in $DC_B_DIRS; do rw "$d"; done
   for d in $DC_A_DENY_EXTRA; do rw "$d"; done
 }
 rules_b() { # cosa B non deve toccare
   rw "$DC_A_CFG"; rwf "$DC_A_JSON"; rw "$DC_A_DATA"
-  [[ $DC_ZONE_OWNER == a ]] && for d in $DC_ZONE_DIRS; do rw "$d"; done
+  for d in $DC_A_DIRS; do rw "$d"; done
   for d in $DC_B_DENY_EXTRA; do rw "$d"; done
 }
 deny_missing() { DC_FILE=$1 DC_RULES=$2 engine deny-missing 2>/dev/null; }
@@ -323,24 +336,29 @@ zsh_block() {
   local B=$DC_B_CMD cfg=${(qq)DC_B_CFG}
   print -r -- "# >>> double-claude >>>"
   print -r -- "# Generato da double-claude. Per cambiarlo: double-claude init && double-claude apply shell"
-  if [[ $DC_ZONE_OWNER == none ]]; then
+  if ! has_dirs; then
     print -r -- "$B() { CLAUDE_CONFIG_DIR=$cfg command claude \"\$@\"; }"
   else
-    local in_fn out_fn in_lbl
-    if [[ $DC_ZONE_OWNER == a ]]; then in_fn=claude out_fn=$B in_lbl=$DC_A_LABEL
-    else in_fn=$B out_fn=claude in_lbl=$DC_B_LABEL; fi
-    print -r -- "_dc_dirs=(${(@qq)DC_ZONE_DIRS})"
+    print -r -- "_dc_a=(${(@qq)DC_A_DIRS})"
+    print -r -- "_dc_b=(${(@qq)DC_B_DIRS})"
     print -r -- '_dc_admin() { case "$1" in mcp|plugin|plugins|config|update|doctor|install|setup-token|-v|--version|-h|--help) return 0;; esac; return 1; }'
-    print -r -- '_dc_in() { local d; for d in "${_dc_dirs[@]}"; do [[ "$PWD/" == "$d/"* ]] && return 0; done; return 1; }'
-    local fn body
+    print -r -- '_dc_in() { local d; for d in "$@"; do [[ "$PWD/" == "$d/"* ]] && return 0; done; return 1; }'
+    local fn other ofn own oth olbl body
     for fn in claude $B; do
-      [[ $fn == claude ]] && body='command claude "$@"' || body="CLAUDE_CONFIG_DIR=$cfg command claude \"\$@\""
+      if [[ $fn == claude ]]; then own=a oth=b ofn=$B olbl=$DC_B_LABEL; body='command claude "$@"'
+      else own=b oth=a ofn=claude olbl=$DC_A_LABEL; body="CLAUDE_CONFIG_DIR=$cfg command claude \"\$@\""; fi
+      local -a mine=(${(P)${:-DC_${(U)own}_DIRS}}) theirs=(${(P)${:-DC_${(U)oth}_DIRS}})
       print -r -- "$fn() {"
-      if [[ $fn == $in_fn ]]; then
-        print -r -- "  if ! _dc_admin \"\$1\" && ! _dc_in; then print -u2 \"$fn: questa cartella è fuori dalla zona $in_lbl. Qui usa $out_fn.\"; return 1; fi"
+      print -r -- "  if ! _dc_admin \"\$1\"; then"
+      if (( $#mine && $#theirs )); then   # tutti e due hanno cartelle: ognuno lavora solo nelle sue
+        print -r -- "    if _dc_in \"\${_dc_${oth}[@]}\"; then print -u2 \"$fn: questa cartella è di $olbl. Qui usa $ofn.\"; return 1; fi"
+        print -r -- "    if ! _dc_in \"\${_dc_${own}[@]}\"; then print -u2 \"$fn: lavora solo in $(dirs_of $mine).\"; return 1; fi"
+      elif (( $#mine )); then
+        print -r -- "    if ! _dc_in \"\${_dc_${own}[@]}\"; then print -u2 \"$fn: lavora solo in $(dirs_of $mine). Qui usa $ofn.\"; return 1; fi"
       else
-        print -r -- "  if ! _dc_admin \"\$1\" && _dc_in; then print -u2 \"$fn: questa cartella è nella zona $in_lbl. Qui usa $in_fn.\"; return 1; fi"
+        print -r -- "    if _dc_in \"\${_dc_${oth}[@]}\"; then print -u2 \"$fn: questa cartella è di $olbl. Qui usa $ofn.\"; return 1; fi"
       fi
+      print -r -- "  fi"
       print -r -- "  $body"
       print -r -- "}"
     done
@@ -520,9 +538,10 @@ cmd_init() {
   say "${_d}Rispondi a qualche domanda. Niente cambia finché non lanci 'double-claude apply'.${_r}"
 
   h2 "1. Da dove parti?"
+  say "   ${_d}Account: l'email con cui entri in Claude. Profilo: dove Claude tiene chat e impostazioni su questo Mac.${_r}"
   say "   1) Ho un solo account e voglio aggiungerne un secondo"
-  say "   2) Ho due account ma un solo Claude: chat e impostazioni si mescolano"
-  say "   3) Ho già due profili, ma qualcosa si mescola"
+  say "   2) Ho due account ma un solo profilo: chat e impostazioni si mescolano"
+  say "   3) Ho già due profili, ma qualcosa passa dall'uno all'altro"
   local n; ask n "Scegli" ${${(M)DC_START:#one}:+1}${${(M)DC_START:#two}:+2}${${(M)DC_START:#split}:+3}
   case $n in 1) DC_START=one;; 3) DC_START=split;; *) DC_START=two;; esac
 
@@ -535,25 +554,33 @@ cmd_init() {
   unset DC_B_CMD DC_B_APP DC_B_CFG DC_B_DATA DC_CLONE; derive
   say "   B avrà: comando ${_b}$DC_B_CMD${_r}, config ${_b}$(tilde $DC_B_CFG)${_r}, app ${_b}$DC_B_APP${_r}"
 
-  h2 "3. Zone ${_d}(facoltativo)${_r}"
-  say "   Vuoi legare uno dei due profili ad alcune cartelle? Per esempio: $DC_A_LABEL solo in ~/Documents/$DC_A_LABEL."
-  say "   ${_d}Se salti, i due comandi funzionano ovunque. Puoi aggiungere una zona più avanti con 'double-claude init'.${_r}"
-  say "   1) Salta: nessuna zona"
-  say "   2) $DC_A_LABEL solo lì, $DC_B_LABEL ovunque tranne lì"
-  say "   3) $DC_B_LABEL solo lì, $DC_A_LABEL ovunque tranne lì"
-  ask n "Scegli" ${${(M)DC_ZONE_OWNER:#none}:+1}${${(M)DC_ZONE_OWNER:#a}:+2}${${(M)DC_ZONE_OWNER:#b}:+3}
-  case $n in 2) DC_ZONE_OWNER=a;; 3) DC_ZONE_OWNER=b;; *) DC_ZONE_OWNER=none;; esac
-  if [[ $DC_ZONE_OWNER != none ]]; then
-    local cur="" d lbl
-    [[ $DC_ZONE_OWNER == a ]] && lbl=$DC_A_LABEL || lbl=$DC_B_LABEL
-    for d in $DC_ZONE_DIRS; do cur+="${cur:+, }$(tilde $d)"; done
-    ask n "Cartelle della zona, separate da virgola" "${cur:-~/Documents/$lbl}"
-    DC_ZONE_DIRS=()
-    for d in ${(s:,:)n}; do d=${${d## #}%% #}; [[ -n $d ]] && DC_ZONE_DIRS+=("$(expand $d)"); done
-    for d in $DC_ZONE_DIRS; do [[ -d $d ]] || warn "$(tilde $d) non esiste ancora"; done
-    (( $#DC_ZONE_DIRS )) || die "serve almeno una cartella."
-  else
-    DC_ZONE_DIRS=()
+  h2 "3. Cartelle dedicate ${_d}(facoltativo)${_r}"
+  local A=$DC_A_LABEL Bl=$DC_B_LABEL
+  say "   Un profilo con una cartella dedicata lavora solo lì. Le cartelle le crea apply, se non esistono."
+  say "   1) Nessuna cartella dedicata: i due comandi funzionano ovunque"
+  say "   2) $Bl lavora solo nella cartella ~/Documents/$Bl, $A ovunque tranne lì"
+  say "   3) $A lavora solo nella cartella ~/Documents/$A, $Bl ovunque tranne lì"
+  say "   4) Una cartella per ciascuno: ~/Documents/$A e ~/Documents/$Bl"
+  local cur_choice=1
+  (( $#DC_B_DIRS && ! $#DC_A_DIRS )) && cur_choice=2
+  (( $#DC_A_DIRS && ! $#DC_B_DIRS )) && cur_choice=3
+  (( $#DC_A_DIRS && $#DC_B_DIRS )) && cur_choice=4
+  ask n "Scegli" $cur_choice
+  local want_a=0 want_b=0
+  case $n in 2) want_b=1;; 3) want_a=1;; 4) want_a=1 want_b=1;; esac
+  ask_dirs() { # ask_dirs a|b etichetta: chiede le cartelle e le salva in DC_A_DIRS o DC_B_DIRS
+    local var=DC_${(U)1}_DIRS cur d ans; cur=$(dirs_of ${(P)var})
+    ask ans "Cartella di $2 (più di una: separale con la virgola)" "${cur:-~/Documents/$2}"
+    local -a out=(); for d in ${(s:,:)ans}; do d=${${d## #}%% #}; [[ -n $d ]] && out+=("$(expand $d)"); done
+    (( $#out )) || die "serve almeno una cartella."
+    set -A $var "${out[@]}"
+  }
+  if (( want_a )); then ask_dirs a $A; else DC_A_DIRS=(); fi
+  if (( want_b )); then ask_dirs b $Bl; else DC_B_DIRS=(); fi
+  if (( want_a && want_b )); then
+    local d e; for d in $DC_A_DIRS; do for e in $DC_B_DIRS; do
+      [[ $d == $e || $d/ == $e/* || $e/ == $d/* ]] && die "le cartelle di $A e di $Bl non possono stare una dentro l'altra."
+    done; done
   fi
 
   h2 "4. Server MCP"
@@ -571,11 +598,11 @@ cmd_init() {
   h2 "5. Cosa separare"
   DC_MODULES=(shell)
   say "   ${_d}Il comando $DC_B_CMD nel Terminale è sempre incluso.${_r}"
-  if [[ $DC_ZONE_OWNER != none ]]; then
+  if has_dirs; then
     if [[ $DC_START == one ]]; then confirm "Alcune chat fatte finora sono di $DC_B_LABEL e vanno spostate?" N && DC_MODULES+=(move)
     else confirm "Sposto in $DC_B_LABEL le chat e la cronologia che gli appartengono?" S && DC_MODULES+=(move); fi
   elif [[ $DC_START != one ]]; then
-    say "   ${_d}Senza zone non so quali chat sono di $DC_B_LABEL: restano dove sono.${_r}"
+    say "   ${_d}Senza cartelle dedicate non so quali chat sono di $DC_B_LABEL: restano dove sono.${_r}"
   fi
   (( $#DC_MCP_MOVE )) && DC_MODULES+=(mcp)
   confirm "Aggiungo i divieti, così nessuno dei due legge i dati dell'altro?" S && DC_MODULES+=(deny)
@@ -604,7 +631,7 @@ cmd_doctor() {
   [[ ${S[json_a]} == broken ]] && { ko "~/.claude.json non è un JSON valido"; hint "ripristina un backup: double-claude restore"; }
   [[ -n ${S[account_a]} ]] && ok "$DC_A_LABEL: ${S[account_a]}" || warn "$DC_A_LABEL: nessun login trovato in ~/.claude.json"
   if [[ ! -d $DC_B_CFG ]]; then ko "$DC_B_LABEL non ha ancora una config ($(tilde $DC_B_CFG))"; hint "double-claude apply shell"
-  elif [[ -z ${S[account_b]} ]]; then ko "$DC_B_LABEL: nessun login"; hint "esci da claude.ai nel browser, poi: cd ~ && $DC_B_CMD e dentro /login"
+  elif [[ -z ${S[account_b]} ]]; then ko "$DC_B_LABEL: nessun login"; hint "esci da claude.ai nel browser, poi: cd $(b_start) && $DC_B_CMD e dentro /login"
   else ok "$DC_B_LABEL: ${S[account_b]}"; fi
   [[ -n ${S[account_a]} && ${S[account_a]} == ${S[account_b]} ]] && { ko "A e B usano lo stesso account"; hint "esci da claude.ai nel browser, poi /logout e /login in $DC_B_CMD"; }
   if [[ ${S[app_same]} == 1 ]]; then
@@ -620,14 +647,20 @@ cmd_doctor() {
   local al; al=$(grep -nE "^[[:space:]]*alias[[:space:]]+(claude|$DC_B_CMD)=" "$HOME/.zshrc" 2>/dev/null)
   [[ -n $al ]] && { ko "un alias scavalca le funzioni (riga ${al%%:*} di ~/.zshrc)"; hint "togli quella riga"; }
 
-  if [[ $DC_ZONE_OWNER != none ]]; then
-    h2 "Chat e cronologia  ${_d}zona $([[ $DC_ZONE_OWNER == a ]] && print $DC_A_LABEL || print $DC_B_LABEL): ${(j:, :)${(@f)$(for d in $DC_ZONE_DIRS; do tilde $d; done)}}${_r}"
+  if has_dirs; then
+    h2 "Cartelle dedicate"
+    local x lbl d; for x in a b; do
+      local -a ds=(${(P)${:-DC_${(U)x}_DIRS}}); [[ $x == a ]] && lbl=$DC_A_LABEL || lbl=$DC_B_LABEL
+      (( $#ds )) || { say "    ${_d}$lbl: nessuna, lavora ovunque tranne nelle cartelle dell'altro${_r}"; continue; }
+      for d in $ds; do [[ -d $d ]] && ok "$lbl lavora solo in $(tilde $d)" || { ko "manca la cartella $(tilde $d) di $lbl"; hint "double-claude apply shell la crea"; }; done
+    done
+    h2 "Chat e cronologia"
     local c=${S[chats_b]} h=${S[history_b]} r=${S[registry_b]}
     if (( c + h + r == 0 )); then ok "in $DC_A_LABEL non c'è niente di $DC_B_LABEL"
     else ko "in $DC_A_LABEL ci sono dati di $DC_B_LABEL: $c chat, $h righe di cronologia, $r voci di registro"; hint "double-claude apply move"; fi
   else
-    h2 "Zone"
-    say "    ${_d}Nessuna zona: claude e $DC_B_CMD funzionano in ogni cartella. Per aggiungerne una: double-claude init.${_r}"
+    h2 "Cartelle dedicate"
+    say "    ${_d}Nessuna: claude e $DC_B_CMD funzionano in ogni cartella. Per sceglierne una: double-claude init.${_r}"
   fi
 
   if (( $#DC_MCP_MOVE )) || [[ -n ${S[mcp_a]}${S[mcp_b]} ]]; then
@@ -702,6 +735,8 @@ cmd_plan() {
   if has_mod shell; then
     h2 "shell · comando $DC_B_CMD"
     say "  Crea $(tilde $DC_B_CFG) e aggiunge questo blocco a ~/.zshrc:"
+    local -a todo=(); local d; for d in $DC_A_DIRS $DC_B_DIRS; do [[ -d $d ]] || todo+=("$(tilde $d)"); done
+    (( $#todo )) && say "  Crea anche le cartelle dedicate: ${(j:, :)todo}"
     zsh_block | sed 's/^/    /'
   fi
   if has_mod move; then
@@ -736,20 +771,23 @@ apply_shell() {
   [[ -s $HOME/.zshrc && -n "$(tail -c1 "$HOME/.zshrc")" ]] && print >> "$HOME/.zshrc"
   zsh_block >> "$HOME/.zshrc"
   ok "aggiunto a ~/.zshrc"
+  local d; for d in $DC_A_DIRS $DC_B_DIRS; do
+    [[ -d $d ]] || { mkdir -p "$d" && ok "creata la cartella $(tilde $d)"; }
+  done
   local al; al=$(grep -nE "^[[:space:]]*alias[[:space:]]+(claude|$DC_B_CMD)=" "$HOME/.zshrc")
   [[ -n $al ]] && warn "un alias scavalca le funzioni (riga ${al%%:*} di ~/.zshrc): toglilo"
   hint "apri un nuovo Terminale per usarlo"
   if [[ ! -f $DC_B_CFG/.claude.json ]] || ! grep -q emailAddress "$DC_B_CFG/.claude.json" 2>/dev/null; then
     say "  Login di $DC_B_LABEL:"
     say "    1. nel browser esci da claude.ai (o usa una finestra privata)"
-    say "    2. in un nuovo Terminale: ${_b}cd ~ && $DC_B_CMD${_r}"
+    say "    2. in un nuovo Terminale: ${_b}cd $(b_start) && $DC_B_CMD${_r}"
     say "    3. dentro scrivi ${_b}/login${_r} e accedi con l'account $DC_B_LABEL"
   fi
 }
 
 apply_move() {
   h2 "move · chat e cronologia"
-  [[ $DC_ZONE_OWNER == none ]] && { warn "senza zone non so quali chat sono di $DC_B_LABEL: salto"; return 0; }
+  has_dirs || { warn "senza cartelle dedicate non so quali chat sono di $DC_B_LABEL: salto"; return 0; }
   local r; r=$(running)
   if [[ -n $r ]]; then
     warn "Claude è aperto e riscrive i suoi file mentre gira:"

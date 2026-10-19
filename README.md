@@ -9,7 +9,7 @@ Chi usa Claude con un account di lavoro e uno personale scopre presto che i due 
 | Account | il login va all'app sbagliata | login dal browser, uno alla volta |
 | App Desktop | una sola app, un solo account | seconda copia dell'app con `--user-data-dir` |
 | Claude Code | chat, MCP, impostazioni in `~/.claude` | `CLAUDE_CONFIG_DIR`, anche nella scheda Code dell'app |
-| Cartelle | ognuno legge i file dell'altro | divieti `Read`/`Edit` e, se vuoi, zone nel Terminale |
+| Cartelle | ognuno legge i file dell'altro | divieti `Read`/`Edit` e, se vuoi, cartelle dedicate |
 
 ## Installazione
 
@@ -34,7 +34,7 @@ Requisiti: macOS, zsh (predefinita), Claude Code installato. Non servono altri p
 
 | Comando | Cosa fa |
 |---|---|
-| `init` | configura i due profili con qualche domanda (le zone sono facoltative) |
+| `init` | configura i due profili con qualche domanda (le cartelle dedicate sono facoltative) |
 | `doctor` | controlla cosa è già separato e cosa no, senza modificare niente |
 | `plan` | mostra cosa farebbe `apply` |
 | `apply [pezzi]` | separa tutto, oppure solo `shell`, `move`, `mcp`, `deny`, `app` |
@@ -44,11 +44,23 @@ Requisiti: macOS, zsh (predefinita), Claude Code installato. Non servono altri p
 
 `apply` fa sempre un backup prima di cambiare qualcosa, in `~/.config/double-claude/backups`.
 
-## Zone (facoltative)
+## Account e profili
 
-Una zona lega un profilo ad alcune cartelle: per esempio `claude` solo in `~/Documents/work` e `claude-personal` ovunque tranne lì. `init` la propone, ma si può saltare: senza zone i due comandi funzionano in ogni cartella e i divieti proteggono comunque le configurazioni dell'altro profilo.
+- **Account**: l'email con cui entri in Claude.
+- **Profilo**: dove Claude tiene chat, impostazioni e server MCP su questo Mac. Il primo è `~/.claude` con l'app Claude; il secondo è `~/.claude-<nome>` con la sua copia dell'app.
 
-Le zone servono anche a capire di chi sono le chat già mescolate. Senza una zona, `apply move` non sposta niente. Si può aggiungere una zona più avanti rilanciando `init`.
+Double Claude dà a ogni account il suo profilo.
+
+## Cartelle dedicate (facoltative)
+
+Un profilo con una cartella dedicata lavora solo lì: il suo comando parte solo dentro quella cartella e l'altro profilo non può leggerla. `init` propone quattro scelte:
+
+1. nessuna cartella dedicata: i due comandi funzionano ovunque;
+2. il secondo profilo lavora solo in `~/Documents/<nome>`, il primo ovunque tranne lì;
+3. il primo profilo lavora solo in `~/Documents/<nome>`, il secondo ovunque tranne lì;
+4. una cartella per ciascuno: ognuno lavora solo nella sua.
+
+Il percorso si può cambiare, e le cartelle che non esistono le crea `apply`. Le cartelle dedicate servono anche a capire di chi sono le chat già mescolate: senza, `apply move` non sposta niente. Si possono aggiungere più avanti rilanciando `init`.
 
 ## La seconda app
 
@@ -61,8 +73,8 @@ Le zone servono anche a capire di chi sono le chat già mescolate. Senza una zon
 ## Da dove parti
 
 - **Un solo account, ne aggiungi un secondo.** `init` → `apply`. Lo spostamento delle chat è facoltativo.
-- **Due account, un solo Claude.** `init` → `plan` → `apply`. Con una zona, le chat e la cronologia del secondo account passano nel suo profilo; senza, restano dove sono.
-- **Due profili che si mescolano.** `init` → `doctor`, poi solo i pezzi indicati con ✗.
+- **Due account, un solo profilo.** `init` → `plan` → `apply`. Con una cartella dedicata, le chat e la cronologia del secondo account passano nel suo profilo; senza, restano dove sono.
+- **Due profili, ma qualcosa passa dall'uno all'altro.** `init` → `doctor`, poi solo i pezzi indicati con ✗.
 
 ## Caso d'uso
 
@@ -72,7 +84,7 @@ Un designer usa Claude con l'account aziendale per i progetti in `~/Documents/wo
 - un server MCP personale compare anche nelle sessioni di lavoro;
 - la cronologia del Terminale contiene i progetti di entrambi.
 
-Con `init` sceglie "work" e "personal" e indica `~/Documents/work` come zona di work. `doctor` mostra quattro ✗. `apply` sposta le chat e la cronologia personali, sposta il server MCP, scrive i divieti e rifà il launcher dell'app personale con `CLAUDE_CONFIG_DIR`. Un secondo `doctor` dà tutti ✓.
+Con `init` sceglie "work" e "personal" e sceglie che work lavori solo in `~/Documents/work`. `doctor` mostra quattro ✗. `apply` sposta le chat e la cronologia personali, sposta il server MCP, scrive i divieti e rifà il launcher dell'app personale con `CLAUDE_CONFIG_DIR`. Un secondo `doctor` dà tutti ✓.
 
 Risultato:
 
