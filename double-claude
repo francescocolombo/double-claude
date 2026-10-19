@@ -16,7 +16,7 @@ setopt extended_glob null_glob pipe_fail
 # CLAUDE_CONFIG_DIR ereditata manderebbe a B i comandi pensati per A.
 unset CLAUDE_CONFIG_DIR
 
-DC_VERSION=1.3.0
+DC_VERSION=1.4.0
 DC_HOME_CFG=${DC_CONFIG_HOME:-$HOME/.config/double-claude}
 DC_CONF=$DC_HOME_CFG/config
 SELF=${0:A}
@@ -29,14 +29,29 @@ if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
 else
   _b= _d= _r= _g= _y= _red= _a= _o=
 fi
-say()  { print -r -- "$*"; }
-h1()   { print; print -r -- "${_b}$*${_r}"; }
-h2()   { print; print -r -- "${_b}$*${_r}"; }
-ok()   { print -r -- "  ${_g}✓${_r} $*"; }
-ko()   { print -r -- "  ${_red}✗${_r} $*"; DC_TODO=$(( DC_TODO + 1 )); return 0; }
-warn() { print -r -- "  ${_y}!${_r} $*"; }
-hint() { print -r -- "    ${_d}→ $*${_r}"; }
-die()  { print -u2 -r -- "${_red}errore:${_r} $*"; exit 1; }
+# ---------------------------------------------------------------- lingua
+# Ogni messaggio ha l'italiano e, accanto, l'inglese: msg "italiano" "english". Con un solo testo vale per tutte e due.
+# La lingua: --lang, poi la variabile DC_LANG, poi DC_LANG nella configurazione, poi la lingua del Mac. Predefinita: inglese.
+DC_LANG_FORCE=${DC_LANG:-}
+DC_UI=en
+lang_of() { [[ $1 == it* ]] && print it || print en; }
+system_lang() {
+  local l=${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}
+  if [[ -z $l || $l == C || $l == C.* || $l == POSIX ]] && [[ $OSTYPE == darwin* ]]; then
+    l=$(command defaults read -g AppleLanguages 2>/dev/null | sed -n 2p | tr -d ' ",')
+  fi
+  lang_of "$l"
+}
+pick() { REPLY=$1; [[ $DC_UI == en && $# -ge 2 ]] && REPLY=$2; return 0; }
+L() { pick "$@"; print -r -- "$REPLY"; }
+say()  { pick "$@"; print -r -- "$REPLY"; }
+h1()   { pick "$@"; print; print -r -- "${_b}$REPLY${_r}"; }
+h2()   { pick "$@"; print; print -r -- "${_b}$REPLY${_r}"; }
+ok()   { pick "$@"; print -r -- "  ${_g}✓${_r} $REPLY"; }
+ko()   { pick "$@"; print -r -- "  ${_red}✗${_r} $REPLY"; DC_TODO=$(( DC_TODO + 1 )); return 0; }
+warn() { pick "$@"; print -r -- "  ${_y}!${_r} $REPLY"; }
+hint() { pick "$@"; print -r -- "    ${_d}→ $REPLY${_r}"; }
+die()  { pick "$@"; print -u2 -r -- "${_red}$(L errore error):${_r} $REPLY"; exit 1; }
 
 ask() { # ask VAR "domanda" [predefinito]
   local __v=$1 __q=$2 __d=${3:-} __x=''
@@ -49,7 +64,8 @@ confirm() { # confirm "domanda" [S|N]
   local d=${2:-S} x=''
   (( DC_YES )) && [[ $d == S ]] && return 0
   (( DC_YES )) && return 1
-  read -r "x?  $1 ${_d}[$([[ $d == S ]] && print S/n || print s/N)]${_r} " || x=''
+  local yn; if [[ $DC_UI == en ]]; then [[ $d == S ]] && yn=Y/n || yn=y/N; else [[ $d == S ]] && yn=S/n || yn=s/N; fi
+  read -r "x?  $1 ${_d}[$yn]${_r} " || x=''
   x=${x:-$d}
   [[ -t 0 ]] || print -r -- "  $1 ${x}"
   [[ $x == [SsYy]* ]]
@@ -75,6 +91,7 @@ defaults() {
   DC_MODULES=(shell move mcp deny app)
   DC_LAUNCHER_HIDE=0       # 1 = launcher fuori dal Dock (LSUIElement), ma non si possono fissare
   DC_SANDBOX=0             # 1 = sandbox di Claude Code per i comandi Bash dei due profili
+  DC_LANG=                 # en | it; vuoto = lingua del Mac
   DC_KEEP_BACKUPS=5        # quanti backup tenere
   DC_APP_SRC=${DC_APP:-/Applications/Claude.app}
   unset DC_B_CMD DC_B_APP DC_B_CFG DC_B_DATA DC_CLONE
@@ -93,6 +110,7 @@ derive() {
 }
 load() {
   defaults; [[ -f $DC_CONF ]] && source "$DC_CONF"
+  [[ -z $DC_LANG_FORCE && -n $DC_LANG ]] && DC_UI=$(lang_of $DC_LANG)
   if (( ! $#DC_A_DIRS && ! $#DC_B_DIRS )); then   # config della 1.1.0: una zona con un proprietario
     [[ $DC_ZONE_OWNER == a ]] && DC_A_DIRS=($DC_ZONE_DIRS)
     [[ $DC_ZONE_OWNER == b ]] && DC_B_DIRS=($DC_ZONE_DIRS)
@@ -102,7 +120,7 @@ load() {
 has_dirs() { (( $#DC_A_DIRS || $#DC_B_DIRS )); }
 dirs_of()  { local d out=(); for d in "$@"; do out+=("$(tilde $d)"); done; print -r -- "${(j:, :)out}"; }
 b_start()  { tilde "${DC_B_DIRS[1]:-$HOME}"; }   # dove B può partire per il login
-need_conf() { [[ -f $DC_CONF ]] || die "nessuna configurazione. Lancia prima: double-claude init"; }
+need_conf() { [[ -f $DC_CONF ]] || die "nessuna configurazione. Lancia prima: double-claude init" "no configuration yet. Run first: double-claude init"; }
 has_mod() { (( ${DC_MODULES[(Ie)$1]} )); }
 is_mac()  { [[ $OSTYPE == darwin* || -n ${DC_FAKE_MAC:-} ]]; }
 
@@ -125,6 +143,7 @@ save_conf() {
     print -r "DC_MODULES=(${(@q)DC_MODULES})"
     print -r "DC_LAUNCHER_HIDE=${(q)DC_LAUNCHER_HIDE}       # 1 = launcher fuori dal Dock"
     print -r "DC_SANDBOX=${(q)DC_SANDBOX}             # 1 = sandbox per i comandi Bash dei due profili"
+    print -r "DC_LANG=${(q)DC_LANG}                # en | it; vuoto = lingua del Mac"
   } > "$DC_CONF"
 }
 
@@ -133,7 +152,7 @@ save_conf() {
 engine() { # engine COMANDO   (input dalle variabili DC_*)
   local src; src=$(engine_src)
   local -x DC_CMD=$1 DC_ADIRS=${(pj:\n:)DC_A_DIRS} DC_BDIRS=${(pj:\n:)DC_B_DIRS} DC_BCFG=$DC_B_CFG
-  local -x DC_ADATA=$DC_A_DATA DC_BDATA=$DC_B_DATA DC_B3P=$DC_B_3P DC_STATE=$DC_HOME_CFG/state.json
+  local -x DC_ADATA=$DC_A_DATA DC_BDATA=$DC_B_DATA DC_B3P=$DC_B_3P DC_STATE=$DC_HOME_CFG/state.json DC_UI=$DC_UI
   if [[ ${DC_JS_RUNTIME:-} == node ]]; then node - <<< "$src"
   else osascript -l JavaScript <<< "$src"; fi
 }
@@ -175,6 +194,7 @@ var io = IS_JXA ? (function () {
 
 function main() {
   var HOME = io.env('HOME'), cmd = io.env('DC_CMD');
+  var EN = io.env('DC_UI') !== 'it', T = function (it, en) { return EN ? en : it; };
   var A = HOME + '/.claude', AJ = HOME + '/.claude.json', B = io.env('DC_BCFG'), BJ = B + '/.claude.json';
   var adirs = io.env('DC_ADIRS').split('\n').filter(Boolean), bdirs = io.env('DC_BDIRS').split('\n').filter(Boolean);
   var enc = function (p) { return p.replace(/[^A-Za-z0-9]/g, '-'); };
@@ -245,16 +265,16 @@ function main() {
     io.mkdirp(LIB);
     io.write(LIB + '/_meta.json', JSON.stringify({ appliedId: id, entries: [{ id: id, name: 'Default' }] }, null, 2));
     io.write(LIB + '/' + id + '.json', JSON.stringify({ disableAutoUpdates: true }, null, 2));
-    io.write(MARK, 'Creata da double-claude: blocca l\'aggiornamento automatico della copia dell\'app.\n');
+    io.write(MARK, 'Created by double-claude: blocks automatic updates of the app copy.\n');
     return 'ours';
   }
 
   if (cmd === 'move') {
     var dry = io.env('DC_DRY') !== '0', m = classify(), out = [];
-    if (m.ja === undefined) return 'ERRORE: ~/.claude.json non è un JSON valido. Non tocco niente.';
+    if (m.ja === undefined) return T('ERRORE: ~/.claude.json non è un JSON valido. Non tocco niente.', 'ERROR: ~/.claude.json is not valid JSON. Not touching anything.');
     var jb = json(BJ);
-    if (jb === undefined) return 'ERRORE: ' + tilde(BJ) + ' non è un JSON valido. Non tocco niente.';
-    out.push(dry ? 'Prova: non cambia niente.' : 'Sposto in ' + tilde(B) + ':');
+    if (jb === undefined) return T('ERRORE: ', 'ERROR: ') + tilde(BJ) + T(' non è un JSON valido. Non tocco niente.', ' is not valid JSON. Not touching anything.');
+    out.push(dry ? T('Prova: non cambia niente.', 'Dry run: nothing changes.') : T('Sposto in ', 'Moving to ') + tilde(B) + ':');
     m.chats.forEach(function (c) {
       out.push('  chat        ' + (c.cwd ? tilde(c.cwd) : c.name));
       if (dry) return;
@@ -268,13 +288,13 @@ function main() {
           io.ls(A + '/todos').forEach(function (t) { if (t.indexOf(id) === 0 && !io.exists(B + '/todos/' + t)) { io.mkdirp(B + '/todos'); io.mv(A + '/todos/' + t, B + '/todos/' + t); } });
         }
       });
-      if (!io.exists(dst)) { io.mkdirp(B + '/projects'); if (!io.mv(src, dst)) out.push('    ! non spostata'); return; }
+      if (!io.exists(dst)) { io.mkdirp(B + '/projects'); if (!io.mv(src, dst)) out.push(T('    ! non spostata', '    ! not moved')); return; }
       io.ls(src).forEach(function (f) { if (!io.exists(dst + '/' + f)) io.mv(src + '/' + f, dst + '/' + f); });
       io.rmEmpty(src);
-      if (io.exists(src)) out.push('    ! alcuni file esistono già in B e sono rimasti in A');
+      if (io.exists(src)) out.push(T('    ! alcuni file esistono già in B e sono rimasti in A', '    ! some files already exist in B and stayed in A'));
     });
-    out.push('  cronologia  ' + m.move.length + ' righe passano a B, ' + m.keep.length + ' restano in A');
-    m.reg.forEach(function (k) { out.push('  registro    ' + tilde(k) + '  ' + (dry ? 'passa a B' : 'spostato in B') + ' con permessi e server MCP del progetto'); });
+    out.push(T('  cronologia  ', '  history     ') + m.move.length + T(' righe passano a B, ', ' lines go to B, ') + m.keep.length + T(' restano in A', ' stay in A'));
+    m.reg.forEach(function (k) { out.push(T('  registro    ', '  registry    ') + tilde(k) + '  ' + (dry ? T('passa a B', 'goes to B') : T('spostato in B', 'moved to B')) + T(' con permessi e server MCP del progetto', ' with the project\'s permissions and MCP servers')); });
     if (!dry) {
       if (m.move.length) {
         io.mkdirp(B);
@@ -287,12 +307,12 @@ function main() {
         jb = jb || {}; jb.projects = jb.projects || {};
         m.reg.forEach(function (k) { if (!jb.projects[k]) jb.projects[k] = m.ja.projects[k]; });
         io.mkdirp(B);
-        if (!io.write(BJ, JSON.stringify(jb, null, 2))) return 'ERRORE: non riesco a scrivere ' + tilde(BJ) + '. Il registro di A non è cambiato.';
+        if (!io.write(BJ, JSON.stringify(jb, null, 2))) return T('ERRORE: non riesco a scrivere ', 'ERROR: can\'t write ') + tilde(BJ) + T('. Il registro di A non è cambiato.', '. The registry of A has not changed.');
         m.reg.forEach(function (k) { delete m.ja.projects[k]; });
         io.write(AJ, JSON.stringify(m.ja, null, 2));
       }
     }
-    out.push('', (dry ? 'Da spostare: ' : 'Spostati: ') + m.chats.length + ' chat, ' + m.move.length + ' righe di cronologia, ' + m.reg.length + ' voci di registro.');
+    out.push('', (dry ? T('Da spostare: ', 'To move: ') : T('Spostati: ', 'Moved: ')) + m.chats.length + T(' chat, ', ' chats, ') + m.move.length + T(' righe di cronologia, ', ' history lines, ') + m.reg.length + T(' voci di registro.', ' registry entries.'));
     return out.join('\n');
   }
 
@@ -308,7 +328,7 @@ function main() {
     var wantDeny = lines(io.env('DC_RULES')), wantDirs = lines(io.env('DC_DIRS'));
     var wantBlock = io.env('DC_BLOCK') === '1', wantSandbox = io.env('DC_SANDBOX') === '1';
     var cur = json(file);
-    if (cur === undefined) return 'error=' + tilde(file) + ' non è un JSON valido';
+    if (cur === undefined) return 'error=' + tilde(file) + T(' non è un JSON valido', ' is not valid JSON');
     cur = cur || {};
     var perm = cur.permissions || {}, deny = perm.deny || [], dirs = perm.additionalDirectories || [];
     var sb = cur.sandbox || {};
@@ -354,7 +374,7 @@ scan() { # riempie l'array associativo S
   typeset -gA S; S=()
   local k v
   while IFS='=' read -r k v; do [[ -n $k ]] && S[$k]=$v; done < <(engine scan 2>/dev/null)
-  [[ -n ${S[json_a]:-} ]] || die "non riesco a leggere le configurazioni (osascript non risponde)."
+  [[ -n ${S[json_a]:-} ]] || die "non riesco a leggere le configurazioni (osascript non risponde)." "can't read the configurations (osascript is not responding)."
 }
 
 # ---------------------------------------------------------------- regole dei divieti
@@ -387,7 +407,7 @@ block_too_old() { local v; v=$(claude_version); [[ -n $v && $(vercmp "$v" $BLOCK
 zsh_block() {
   local B=$DC_B_CMD cfg=${(qq)DC_B_CFG}
   print -r -- "# >>> double-claude >>>"
-  print -r -- "# Generato da double-claude. Per cambiarlo: double-claude init && double-claude apply shell"
+  print -r -- "# $(L "Generato da double-claude. Per cambiarlo: double-claude init && double-claude apply shell" "Generated by double-claude. To change it: double-claude init && double-claude apply shell")"
   if ! has_dirs; then
     print -r -- "$B() { CLAUDE_CONFIG_DIR=$cfg command claude \"\$@\"; }"
   else
@@ -403,12 +423,12 @@ zsh_block() {
       print -r -- "$fn() {"
       print -r -- "  if ! _dc_admin \"\$1\"; then"
       if (( $#mine && $#theirs )); then   # tutti e due hanno cartelle: ognuno lavora solo nelle sue
-        print -r -- "    if _dc_in \"\${_dc_${oth}[@]}\"; then print -u2 \"$fn: questa cartella è di $olbl. Qui usa $ofn.\"; return 1; fi"
-        print -r -- "    if ! _dc_in \"\${_dc_${own}[@]}\"; then print -u2 \"$fn: lavora solo in $(dirs_of $mine).\"; return 1; fi"
+        print -r -- "    if _dc_in \"\${_dc_${oth}[@]}\"; then print -u2 \"$fn: $(L "questa cartella è di $olbl. Qui usa $ofn." "this folder belongs to $olbl. Use $ofn here.")\"; return 1; fi"
+        print -r -- "    if ! _dc_in \"\${_dc_${own}[@]}\"; then print -u2 \"$fn: $(L "lavora solo in $(dirs_of $mine)." "works only in $(dirs_of $mine).")\"; return 1; fi"
       elif (( $#mine )); then
-        print -r -- "    if ! _dc_in \"\${_dc_${own}[@]}\"; then print -u2 \"$fn: lavora solo in $(dirs_of $mine). Qui usa $ofn.\"; return 1; fi"
+        print -r -- "    if ! _dc_in \"\${_dc_${own}[@]}\"; then print -u2 \"$fn: $(L "lavora solo in $(dirs_of $mine). Qui usa $ofn." "works only in $(dirs_of $mine). Use $ofn here.")\"; return 1; fi"
       else
-        print -r -- "    if _dc_in \"\${_dc_${oth}[@]}\"; then print -u2 \"$fn: questa cartella è di $olbl. Qui usa $ofn.\"; return 1; fi"
+        print -r -- "    if _dc_in \"\${_dc_${oth}[@]}\"; then print -u2 \"$fn: $(L "questa cartella è di $olbl. Qui usa $ofn." "this folder belongs to $olbl. Use $ofn here.")\"; return 1; fi"
       fi
       print -r -- "  fi"
       print -r -- "  $body"
@@ -425,15 +445,15 @@ strip_block() { # toglie il blocco double-claude da un file
 # ---------------------------------------------------------------- processi e app
 running() { # elenco breve dei Claude aperti: app e Terminale
   [[ -n ${DC_SKIP_RUNNING_CHECK:-} ]] && return 0
-  ps -A -o pid= -o command= 2>/dev/null | grep -v -e grep -e double-claude | awk '
-    /\.app\/Contents\/MacOS\/Claude$/ || /\.app\/Contents\/MacOS\/Claude --/ { print "app Claude (pid " $1 ")"; next }
-    $2 == "claude" || $2 ~ /\/claude$/ { print "claude nel Terminale (pid " $1 ")" }'
+  ps -A -o pid= -o command= 2>/dev/null | grep -v -e grep -e double-claude | awk -v app="$(L 'app Claude' 'Claude app')" -v term="$(L 'claude nel Terminale' 'claude in the Terminal')" '
+    /\.app\/Contents\/MacOS\/Claude$/ || /\.app\/Contents\/MacOS\/Claude --/ { print app " (pid " $1 ")"; next }
+    $2 == "claude" || $2 ~ /\/claude$/ { print term " (pid " $1 ")" }'
 }
 mains()   { ps -A -o pid= -o command= 2>/dev/null | grep -F -- "$1/Contents/MacOS/Claude" | grep -v -e grep -e 'Claude Helper' | sed 's/^ *//'; }
 strays()  { mains "$DC_CLONE" | grep -v -- '--user-data-dir=' | awk '{print $1}'; }   # la copia aperta senza il suo profilo
 focus()   { osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $1) to true" >/dev/null 2>&1; }
 dialog()  { # dialog "messaggio" "pulsante sì": vero se l'utente sceglie il pulsante
-  local r; r=$(osascript -e 'on run argv' -e 'display dialog (item 1 of argv) buttons {"Lascia così", item 2 of argv} default button 2 with title "double-claude" with icon caution' -e 'return button returned of result' -e 'end run' "$1" "$2" 2>/dev/null)
+  local r; r=$(osascript -e 'on run argv' -e 'display dialog (item 1 of argv) buttons {item 3 of argv, item 2 of argv} default button 2 with title "double-claude" with icon caution' -e 'return button returned of result' -e 'end run' "$1" "$2" "$(L "Lascia così" "Leave it")" 2>/dev/null)
   [[ $r == $2 ]]
 }
 quit_pids() { # chiude le app con NSRunningApplication e aspetta fino a 15 secondi
@@ -500,10 +520,10 @@ open_b() {
   [[ -n $p ]] && { focus "$p"; return; }
   local -a bad=(${(f)"$(strays)"})
   if (( $#bad )); then
-    if ! dialog "$DC_B_APP è già aperta, ma senza il suo profilo: mostra l'account $DC_A_LABEL. La chiudo e la riapro con l'account $DC_B_LABEL?" "Riapri"; then
+    if ! dialog "$(L "$DC_B_APP è già aperta, ma senza il suo profilo: mostra l'account $DC_A_LABEL. La chiudo e la riapro con l'account $DC_B_LABEL?" "$DC_B_APP is already open, but without its profile: it shows the $DC_A_LABEL account. Quit it and reopen it with the $DC_B_LABEL account?")" "$(L Riapri Reopen)"; then
       focus "$bad[1]"; return 0
     fi
-    quit_pids $bad || { dialog "$DC_B_APP non si chiude. Chiudila con ⌘Q, poi riaprila da qui." "OK"; return 1; }
+    quit_pids $bad || { dialog "$(L "$DC_B_APP non si chiude. Chiudila con ⌘Q, poi riaprila da qui." "$DC_B_APP won't quit. Quit it with ⌘Q, then reopen it from here.")" "OK"; return 1; }
   fi
   build_clone || return 1
   [[ -d $DC_B_3P ]] || block_updates >/dev/null
@@ -542,16 +562,32 @@ do_backup() { # do_backup [backup da non cancellare]
   [[ -f $HOME/.zshrc ]] && cpc "$HOME/.zshrc" "$BK/zshrc"
   [[ -d $DC_B_CFG ]] && cpc "$DC_B_CFG" "$BK/profile-b"
   [[ -f $DC_HOME_CFG/state.json ]] && cpc "$DC_HOME_CFG/state.json" "$BK/state.json"
-  ok "backup in $(tilde $BK)"
+  ok "backup in $(tilde $BK)" "backup in $(tilde $BK)"
   local -a all=($DC_HOME_CFG/backups/*.noindex(N/nOn)) old=(); local b n=0
   for b in $all; do (( ++n > DC_KEEP_BACKUPS )) && [[ $b != ${1:-} ]] && old+=("$b"); done
-  if (( $#old )); then rm -rf "${old[@]}"; say "    ${_d}tolti $#old backup vecchi: ne tengo $DC_KEEP_BACKUPS${_r}"; fi
+  if (( $#old )); then rm -rf "${old[@]}"; say "    ${_d}tolti $#old backup vecchi: ne tengo $DC_KEEP_BACKUPS${_r}" "    ${_d}removed $#old old backups: keeping $DC_KEEP_BACKUPS${_r}"; fi
   return 0
 }
 
 # ================================================================ comandi
 cmd_help() {
-  cat <<EOF
+  if [[ $DC_UI == en ]]; then cat <<EOF
+${_b}double-claude${_r} ${_d}$DC_VERSION${_r}  two Claude accounts on the same Mac, without mixing them up
+
+  ${_b}init${_r}          set up the two profiles with a few questions
+  ${_b}doctor${_r}        check what is already separated and what isn't
+  ${_b}plan${_r}          show what apply would do, without changing anything
+  ${_b}apply${_r} [parts] separate everything, or only: shell move mcp deny app
+  ${_b}open${_r} NAME     open the right profile's app (used by the launchers)
+  ${_b}status${_r}        show the open Claude apps and their profile
+  ${_b}backup${_r}        save a copy of the configurations
+  ${_b}restore${_r} [n]   go back to a backup (the latest if you don't give n)
+  ${_b}install${_r}       copy itself to ~/.local/bin
+
+  Options: ${_b}--yes${_r} accepts the default answers, ${_b}--lang en|it${_r} picks the language.
+  Configuration: $(tilde $DC_CONF)
+EOF
+  else cat <<EOF
 ${_b}double-claude${_r} ${_d}$DC_VERSION${_r}  due account Claude sullo stesso Mac, senza che si mescolino
 
   ${_b}init${_r}          configura i due profili con qualche domanda
@@ -564,410 +600,411 @@ ${_b}double-claude${_r} ${_d}$DC_VERSION${_r}  due account Claude sullo stesso M
   ${_b}restore${_r} [n]   torna a un backup (il più recente se non indichi n)
   ${_b}install${_r}       si copia in ~/.local/bin
 
-  Opzione: ${_b}--yes${_r} accetta le risposte predefinite.
+  Opzioni: ${_b}--yes${_r} accetta le risposte predefinite, ${_b}--lang en|it${_r} sceglie la lingua.
   Configurazione: $(tilde $DC_CONF)
 EOF
+  fi
 }
 
 cmd_install() {
   local dst=$HOME/.local/bin/double-claude fresh=0
-  h1 "Double Claude $DC_VERSION · installazione"
-  zsh -n "$SELF" 2>/dev/null || die "lo script in $(tilde $SELF) è incompleto o non è Double Claude. Copialo di nuovo dalla pagina."
-  ok "script completo ($(wc -l < "$SELF" | tr -d ' ') righe)"
+  h1 "Double Claude $DC_VERSION · installazione" "Double Claude $DC_VERSION · install"
+  zsh -n "$SELF" 2>/dev/null || die "lo script in $(tilde $SELF) è incompleto o non è Double Claude. Copialo di nuovo dalla pagina." "the script in $(tilde $SELF) is incomplete or is not Double Claude. Copy it again."
+  ok "script completo ($(wc -l < "$SELF" | tr -d ' ') righe)" "script complete ($(wc -l < "$SELF" | tr -d ' ') lines)"
   mkdir -p "${dst:h}"
   if [[ $SELF != $dst ]]; then cp "$SELF" "$dst"; fi
   chmod +x "$dst"
-  ok "installato in $(tilde $dst)"
+  ok "installato in $(tilde $dst)" "installed in $(tilde $dst)"
   if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
     if ! grep -qsF '.local/bin' "$HOME/.zshrc"; then
       print -r -- 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
-      ok "aggiunto ~/.local/bin al PATH in ~/.zshrc"
+      ok "aggiunto ~/.local/bin al PATH in ~/.zshrc" "added ~/.local/bin to PATH in ~/.zshrc"
     fi
     fresh=1
   fi
-  is_mac || warn "Double Claude è fatto per macOS: qui funziona solo in parte"
-  whence -p claude >/dev/null && ok "Claude Code trovato" || warn "non trovo il comando claude: installa prima Claude Code"
+  is_mac || warn "Double Claude è fatto per macOS: qui funziona solo in parte" "Double Claude is made for macOS: here it works only in part"
+  whence -p claude >/dev/null && ok "Claude Code trovato" "Claude Code found" || warn "non trovo il comando claude: installa prima Claude Code" "claude command not found: install Claude Code first"
   print
-  if (( fresh )); then say "Fatto. Apri un nuovo Terminale e scrivi ${_b}double-claude init${_r}"
-  else say "Fatto. Ora scrivi ${_b}double-claude init${_r}"; fi
+  if (( fresh )); then say "Fatto. Apri un nuovo Terminale e scrivi ${_b}double-claude init${_r}" "Done. Open a new Terminal and type ${_b}double-claude init${_r}"
+  else say "Fatto. Ora scrivi ${_b}double-claude init${_r}" "Done. Now type ${_b}double-claude init${_r}"; fi
 }
 
 cmd_init() {
   load
-  h1 "double-claude · configurazione"
-  say "Due account Claude, separati su quattro livelli: account, app, Claude Code, cartelle."
-  say "${_d}Rispondi a qualche domanda. Niente cambia finché non lanci 'double-claude apply'.${_r}"
+  h1 "double-claude · configurazione" "double-claude · setup"
+  say "Due account Claude, separati su quattro livelli: account, app, Claude Code, cartelle." "Two Claude accounts, kept apart on four levels: account, app, Claude Code, folders."
+  say "${_d}Rispondi a qualche domanda. Niente cambia finché non lanci 'double-claude apply'.${_r}" "${_d}Answer a few questions. Nothing changes until you run 'double-claude apply'.${_r}"
 
-  h2 "1. Da dove parti?"
-  say "   ${_d}Account: l'email con cui entri in Claude. Profilo: dove Claude tiene chat e impostazioni su questo Mac.${_r}"
-  say "   1) Ho un solo account e voglio aggiungerne un secondo"
-  say "   2) Ho due account ma un solo profilo: chat e impostazioni si mescolano"
-  say "   3) Ho già due profili, ma qualcosa passa dall'uno all'altro"
-  local n; ask n "Scegli" ${${(M)DC_START:#one}:+1}${${(M)DC_START:#two}:+2}${${(M)DC_START:#split}:+3}
+  h2 "1. Da dove parti?" "1. Where are you starting from?"
+  say "   ${_d}Account: l'email con cui entri in Claude. Profilo: dove Claude tiene chat e impostazioni su questo Mac.${_r}" "   ${_d}Account: the email you sign in to Claude with. Profile: where Claude keeps chats and settings on this Mac.${_r}"
+  say "   1) Ho un solo account e voglio aggiungerne un secondo" "   1) I have one account and want to add a second one"
+  say "   2) Ho due account ma un solo profilo: chat e impostazioni si mescolano" "   2) I have two accounts but one profile: chats and settings get mixed"
+  say "   3) Ho già due profili, ma qualcosa passa dall'uno all'altro" "   3) I already have two profiles, but something leaks from one to the other"
+  local n; ask n "$(L Scegli Choose)" ${${(M)DC_START:#one}:+1}${${(M)DC_START:#two}:+2}${${(M)DC_START:#split}:+3}
   case $n in 1) DC_START=one;; 3) DC_START=split;; *) DC_START=two;; esac
 
-  h2 "2. I nomi"
-  say "   ${_d}A è il profilo che usi già (~/.claude, app Claude). B è il secondo.${_r}"
-  ask DC_A_LABEL "Nome di A" "$DC_A_LABEL"
-  ask DC_B_LABEL "Nome di B" "$DC_B_LABEL"
-  [[ $DC_A_LABEL == [a-z0-9-]## && $DC_B_LABEL == [a-z0-9-]## ]] || die "usa solo minuscole, numeri e trattini nei nomi."
-  [[ $DC_A_LABEL != $DC_B_LABEL ]] || die "i due nomi devono essere diversi."
+  h2 "2. I nomi" "2. Names"
+  say "   ${_d}A è il profilo che usi già (~/.claude, app Claude). B è il secondo.${_r}" "   ${_d}A is the profile you already use (~/.claude, Claude app). B is the second one.${_r}"
+  ask DC_A_LABEL "$(L "Nome di A" "Name of A")" "$DC_A_LABEL"
+  ask DC_B_LABEL "$(L "Nome di B" "Name of B")" "$DC_B_LABEL"
+  [[ $DC_A_LABEL == [a-z0-9-]## && $DC_B_LABEL == [a-z0-9-]## ]] || die "usa solo minuscole, numeri e trattini nei nomi." "use only lowercase letters, numbers and hyphens in names."
+  [[ $DC_A_LABEL != $DC_B_LABEL ]] || die "i due nomi devono essere diversi." "the two names must be different."
   unset DC_B_CMD DC_B_APP DC_B_CFG DC_B_DATA DC_CLONE; derive
-  say "   B avrà: comando ${_b}$DC_B_CMD${_r}, config ${_b}$(tilde $DC_B_CFG)${_r}, app ${_b}$DC_B_APP${_r}"
+  say "   B avrà: comando ${_b}$DC_B_CMD${_r}, config ${_b}$(tilde $DC_B_CFG)${_r}, app ${_b}$DC_B_APP${_r}" "   B will have: command ${_b}$DC_B_CMD${_r}, config ${_b}$(tilde $DC_B_CFG)${_r}, app ${_b}$DC_B_APP${_r}"
 
-  h2 "3. Cartelle dedicate ${_d}(facoltativo)${_r}"
+  h2 "3. Cartelle dedicate ${_d}(facoltativo)${_r}" "3. Dedicated folders ${_d}(optional)${_r}"
   local A=$DC_A_LABEL Bl=$DC_B_LABEL
-  say "   Un profilo con una cartella dedicata lavora solo lì. Le cartelle le crea apply, se non esistono."
-  say "   1) Nessuna cartella dedicata: i due comandi funzionano ovunque"
-  say "   2) $Bl lavora solo nella cartella ~/Documents/$Bl, $A ovunque tranne lì"
-  say "   3) $A lavora solo nella cartella ~/Documents/$A, $Bl ovunque tranne lì"
-  say "   4) Una cartella per ciascuno: ~/Documents/$A e ~/Documents/$Bl"
+  say "   Un profilo con una cartella dedicata lavora solo lì. Le cartelle le crea apply, se non esistono." "   A profile with a dedicated folder works only there. apply creates the folders if they don't exist."
+  say "   1) Nessuna cartella dedicata: i due comandi funzionano ovunque" "   1) No dedicated folder: both commands work everywhere"
+  say "   2) $Bl lavora solo nella cartella ~/Documents/$Bl, $A ovunque tranne lì" "   2) $Bl works only in ~/Documents/$Bl, $A everywhere else"
+  say "   3) $A lavora solo nella cartella ~/Documents/$A, $Bl ovunque tranne lì" "   3) $A works only in ~/Documents/$A, $Bl everywhere else"
+  say "   4) Una cartella per ciascuno: ~/Documents/$A e ~/Documents/$Bl" "   4) One folder each: ~/Documents/$A and ~/Documents/$Bl"
   local cur_choice=1
   (( $#DC_B_DIRS && ! $#DC_A_DIRS )) && cur_choice=2
   (( $#DC_A_DIRS && ! $#DC_B_DIRS )) && cur_choice=3
   (( $#DC_A_DIRS && $#DC_B_DIRS )) && cur_choice=4
-  ask n "Scegli" $cur_choice
+  ask n "$(L Scegli Choose)" $cur_choice
   local want_a=0 want_b=0
   case $n in 2) want_b=1;; 3) want_a=1;; 4) want_a=1 want_b=1;; esac
   ask_dirs() { # ask_dirs a|b etichetta: chiede le cartelle e le salva in DC_A_DIRS o DC_B_DIRS
     local var=DC_${(U)1}_DIRS cur d ans; cur=$(dirs_of ${(P)var})
-    ask ans "Cartella di $2 (più di una: separale con la virgola)" "${cur:-~/Documents/$2}"
+    ask ans "$(L "Cartella di $2 (più di una: separale con la virgola)" "Folder of $2 (more than one: separate with commas)")" "${cur:-~/Documents/$2}"
     local -a out=(); for d in ${(s:,:)ans}; do d=${${d## #}%% #}; [[ -n $d ]] && out+=("$(expand $d)"); done
-    (( $#out )) || die "serve almeno una cartella."
+    (( $#out )) || die "serve almeno una cartella." "at least one folder is needed."
     set -A $var "${out[@]}"
   }
   if (( want_a )); then ask_dirs a $A; else DC_A_DIRS=(); fi
   if (( want_b )); then ask_dirs b $Bl; else DC_B_DIRS=(); fi
   if (( want_a && want_b )); then
     local d e; for d in $DC_A_DIRS; do for e in $DC_B_DIRS; do
-      [[ $d == $e || $d/ == $e/* || $e/ == $d/* ]] && die "le cartelle di $A e di $Bl non possono stare una dentro l'altra."
+      [[ $d == $e || $d/ == $e/* || $e/ == $d/* ]] && die "le cartelle di $A e di $Bl non possono stare una dentro l'altra." "the folders of $A and $Bl can't be inside one another."
     done; done
   fi
 
-  h2 "4. Server MCP"
+  h2 "4. Server MCP" "4. MCP servers"
   local -a in_a
   if [[ -f $DC_A_JSON ]]; then scan; in_a=(${(s: :)S[mcp_a]}); fi
   if (( $#in_a )); then
-    say "   In $DC_A_LABEL ci sono: ${_b}${in_a[*]}${_r}"
-    [[ $DC_START == one ]] && say "   ${_d}Con un solo account di solito non serve: lascia vuoto.${_r}"
-    ask n "Quali passano a $DC_B_LABEL? (nomi separati da spazio, vuoto = nessuno)" "${DC_MCP_MOVE[*]}"
+    say "   In $DC_A_LABEL ci sono: ${_b}${in_a[*]}${_r}" "   $DC_A_LABEL has: ${_b}${in_a[*]}${_r}"
+    [[ $DC_START == one ]] && say "   ${_d}Con un solo account di solito non serve: lascia vuoto.${_r}" "   ${_d}With a single account you usually don't need this: leave it empty.${_r}"
+    ask n "$(L "Quali passano a $DC_B_LABEL? (nomi separati da spazio, vuoto = nessuno)" "Which ones move to $DC_B_LABEL? (names separated by spaces, empty = none)")" "${DC_MCP_MOVE[*]}"
     DC_MCP_MOVE=(${(s: :)n})
   else
-    say "   ${_d}Nessun server MCP globale in $DC_A_LABEL.${_r}"; DC_MCP_MOVE=()
+    say "   ${_d}Nessun server MCP globale in $DC_A_LABEL.${_r}" "   ${_d}No global MCP servers in $DC_A_LABEL.${_r}"; DC_MCP_MOVE=()
   fi
 
-  h2 "5. Cosa separare"
+  h2 "5. Cosa separare" "5. What to separate"
   DC_MODULES=(shell)
-  say "   ${_d}Il comando $DC_B_CMD nel Terminale è sempre incluso.${_r}"
+  say "   ${_d}Il comando $DC_B_CMD nel Terminale è sempre incluso.${_r}" "   ${_d}The $DC_B_CMD command in the Terminal is always included.${_r}"
   if has_dirs; then
-    if [[ $DC_START == one ]]; then confirm "Alcune chat fatte finora sono di $DC_B_LABEL e vanno spostate?" N && DC_MODULES+=(move)
-    else confirm "Sposto in $DC_B_LABEL le chat e la cronologia che gli appartengono?" S && DC_MODULES+=(move); fi
+    if [[ $DC_START == one ]]; then confirm "$(L "Alcune chat fatte finora sono di $DC_B_LABEL e vanno spostate?" "Do some chats made so far belong to $DC_B_LABEL and need moving?")" N && DC_MODULES+=(move)
+    else confirm "$(L "Sposto in $DC_B_LABEL le chat e la cronologia che gli appartengono?" "Move the chats and history that belong to $DC_B_LABEL?")" S && DC_MODULES+=(move); fi
   elif [[ $DC_START != one ]]; then
-    say "   ${_d}Senza cartelle dedicate riconosco solo le chat fatte nella scheda Code di $DC_B_APP: le altre restano dove sono.${_r}"
-    confirm "Sposto in $DC_B_LABEL le chat della scheda Code di $DC_B_APP finite in $DC_A_LABEL?" S && DC_MODULES+=(move)
+    say "   ${_d}Senza cartelle dedicate riconosco solo le chat fatte nella scheda Code di $DC_B_APP: le altre restano dove sono.${_r}" "   ${_d}Without dedicated folders I can only recognize chats made in the Code tab of $DC_B_APP: the others stay where they are.${_r}"
+    confirm "$(L "Sposto in $DC_B_LABEL le chat della scheda Code di $DC_B_APP finite in $DC_A_LABEL?" "Move to $DC_B_LABEL the chats from the Code tab of $DC_B_APP that ended up in $DC_A_LABEL?")" S && DC_MODULES+=(move)
   fi
   (( $#DC_MCP_MOVE )) && DC_MODULES+=(mcp)
-  if confirm "Aggiungo i divieti, così nessuno dei due legge i dati dell'altro?" S; then
+  if confirm "$(L "Aggiungo i divieti, così nessuno dei due legge i dati dell'altro?" "Add deny rules, so neither can read the other's data?")" S; then
     DC_MODULES+=(deny)
-    (( $#DC_A_DIRS )) && say "   ${_d}$DC_A_LABEL leggerà file solo dalle sue cartelle.${_r}"
-    (( $#DC_B_DIRS )) && say "   ${_d}$DC_B_LABEL leggerà file solo dalle sue cartelle.${_r}"
-    say "   ${_d}I divieti valgono per gli strumenti file e per comandi come cat e sed, non per script o grep -r.${_r}"
-    say "   ${_d}Il sandbox li applica a tutti i comandi, ma la rete passa da un elenco di siti: Claude ti chiede ogni sito nuovo.${_r}"
-    if confirm "Attivo anche il sandbox?" $( (( DC_SANDBOX )) && print S || print N); then DC_SANDBOX=1; else DC_SANDBOX=0; fi
+    (( $#DC_A_DIRS )) && say "   ${_d}$DC_A_LABEL leggerà file solo dalle sue cartelle.${_r}" "   ${_d}$DC_A_LABEL will read files only from its folders.${_r}"
+    (( $#DC_B_DIRS )) && say "   ${_d}$DC_B_LABEL leggerà file solo dalle sue cartelle.${_r}" "   ${_d}$DC_B_LABEL will read files only from its folders.${_r}"
+    say "   ${_d}I divieti valgono per gli strumenti file e per comandi come cat e sed, non per script o grep -r.${_r}" "   ${_d}Deny rules apply to file tools and to commands like cat and sed, not to scripts or grep -r.${_r}"
+    say "   ${_d}Il sandbox li applica a tutti i comandi, ma la rete passa da un elenco di siti: Claude ti chiede ogni sito nuovo.${_r}" "   ${_d}The sandbox applies them to every command, but network access goes through an allowlist: Claude asks you about each new site.${_r}"
+    if confirm "$(L "Attivo anche il sandbox?" "Turn on the sandbox too?")" $( (( DC_SANDBOX )) && print S || print N); then DC_SANDBOX=1; else DC_SANDBOX=0; fi
   fi
   if is_mac && [[ -d $DC_APP_SRC ]]; then
-    if confirm "Creo una seconda app Desktop per $DC_B_LABEL ($DC_B_APP)?" S; then
+    if confirm "$(L "Creo una seconda app Desktop per $DC_B_LABEL ($DC_B_APP)?" "Create a second Desktop app for $DC_B_LABEL ($DC_B_APP)?")" S; then
       DC_MODULES+=(app)
-      say "   ${_d}I launcher possono stare nel Dock (e si possono fissare) oppure restarne fuori (si aprono da Spotlight).${_r}"
-      if confirm "Tengo i launcher fuori dal Dock?" $( (( DC_LAUNCHER_HIDE )) && print S || print N); then DC_LAUNCHER_HIDE=1; else DC_LAUNCHER_HIDE=0; fi
+      say "   ${_d}I launcher possono stare nel Dock (e si possono fissare) oppure restarne fuori (si aprono da Spotlight).${_r}" "   ${_d}Launchers can live in the Dock (and be pinned) or stay out of it (open them from Spotlight).${_r}"
+      if confirm "$(L "Tengo i launcher fuori dal Dock?" "Keep the launchers out of the Dock?")" $( (( DC_LAUNCHER_HIDE )) && print S || print N); then DC_LAUNCHER_HIDE=1; else DC_LAUNCHER_HIDE=0; fi
     fi
   else
-    say "   ${_d}App Desktop non trovata in $DC_APP_SRC: salto la seconda app.${_r}"
+    say "   ${_d}App Desktop non trovata in $DC_APP_SRC: salto la seconda app.${_r}" "   ${_d}Desktop app not found in $DC_APP_SRC: skipping the second app.${_r}"
   fi
 
   save_conf
-  h2 "Fatto"
-  ok "configurazione salvata in $(tilde $DC_CONF)"
-  if [[ $DC_START == split ]]; then hint "ora: double-claude doctor"; else hint "ora: double-claude plan, poi double-claude apply"; fi
+  h2 "Fatto" "Done"
+  ok "configurazione salvata in $(tilde $DC_CONF)" "configuration saved in $(tilde $DC_CONF)"
+  if [[ $DC_START == split ]]; then hint "ora: double-claude doctor" "next: double-claude doctor"; else hint "ora: double-claude plan, poi double-claude apply" "next: double-claude plan, then double-claude apply"; fi
 }
 
 cmd_doctor() {
   need_conf; load; scan
   DC_TODO=0
-  h1 "double-claude · diagnosi  ${_d}$DC_A_LABEL (A) · $DC_B_LABEL (B)${_r}"
+  h1 "double-claude · diagnosi  ${_d}$DC_A_LABEL (A) · $DC_B_LABEL (B)${_r}" "double-claude · checkup  ${_d}$DC_A_LABEL (A) · $DC_B_LABEL (B)${_r}"
 
   h2 "Account"
-  [[ ${S[json_a]} == broken ]] && { ko "~/.claude.json non è un JSON valido"; hint "ripristina un backup: double-claude restore"; }
-  [[ -n ${S[account_a]} ]] && ok "$DC_A_LABEL: ${S[account_a]}" || warn "$DC_A_LABEL: nessun login trovato in ~/.claude.json"
-  if [[ ! -d $DC_B_CFG ]]; then ko "$DC_B_LABEL non ha ancora una config ($(tilde $DC_B_CFG))"; hint "double-claude apply shell"
-  elif [[ -z ${S[account_b]} ]]; then ko "$DC_B_LABEL: nessun login"; hint "esci da claude.ai nel browser, poi: cd $(b_start) && $DC_B_CMD e dentro /login"
+  [[ ${S[json_a]} == broken ]] && { ko "~/.claude.json non è un JSON valido" "~/.claude.json is not valid JSON"; hint "ripristina un backup: double-claude restore" "restore a backup: double-claude restore"; }
+  [[ -n ${S[account_a]} ]] && ok "$DC_A_LABEL: ${S[account_a]}" || warn "$DC_A_LABEL: nessun login trovato in ~/.claude.json" "$DC_A_LABEL: no login found in ~/.claude.json"
+  if [[ ! -d $DC_B_CFG ]]; then ko "$DC_B_LABEL non ha ancora una config ($(tilde $DC_B_CFG))" "$DC_B_LABEL has no config yet ($(tilde $DC_B_CFG))"; hint "double-claude apply shell"
+  elif [[ -z ${S[account_b]} ]]; then ko "$DC_B_LABEL: nessun login" "$DC_B_LABEL: not logged in"; hint "esci da claude.ai nel browser, poi: cd $(b_start) && $DC_B_CMD e dentro /login" "sign out of claude.ai in the browser, then: cd $(b_start) && $DC_B_CMD and type /login"
   else ok "$DC_B_LABEL: ${S[account_b]}"; fi
-  [[ -n ${S[account_a]} && ${S[account_a]} == ${S[account_b]} ]] && { ko "A e B usano lo stesso account"; hint "esci da claude.ai nel browser, poi /logout e /login in $DC_B_CMD"; }
+  [[ -n ${S[account_a]} && ${S[account_a]} == ${S[account_b]} ]] && { ko "A e B usano lo stesso account" "A and B use the same account"; hint "esci da claude.ai nel browser, poi /logout e /login in $DC_B_CMD" "sign out of claude.ai in the browser, then /logout and /login in $DC_B_CMD"; }
   if [[ ${S[app_same]} == 1 ]]; then
-    ko "le app $DC_A_APP e $DC_B_APP usano lo stesso account"
-    hint "chiudi $DC_A_APP, poi in $DC_B_APP esci e rientra con l'account $DC_B_LABEL (il link di accesso va all'app aperta)"
+    ko "le app $DC_A_APP e $DC_B_APP usano lo stesso account" "the $DC_A_APP and $DC_B_APP apps use the same account"
+    hint "chiudi $DC_A_APP, poi in $DC_B_APP esci e rientra con l'account $DC_B_LABEL (il link di accesso va all'app aperta)" "quit $DC_A_APP, then in $DC_B_APP sign out and back in with the $DC_B_LABEL account (the sign-in link goes to the open app)"
   fi
 
-  h2 "Terminale"
-  [[ -n $CLAUDE_BIN ]] && ok "claude installato ($(tilde $CLAUDE_BIN))" || ko "comando claude non trovato"
-  if grep -qs '^# >>> double-claude >>>' "$HOME/.zshrc"; then ok "comando $DC_B_CMD in ~/.zshrc"
-  elif grep -qsF -- "$DC_B_CFG" "$HOME/.zshrc" || grep -qsF -- "$(tilde $DC_B_CFG)" "$HOME/.zshrc"; then ok "comando $DC_B_CMD in ~/.zshrc ${_d}(creato a mano)${_r}"
-  else ko "manca il comando $DC_B_CMD"; hint "double-claude apply shell"; fi
+  h2 "Terminale" "Terminal"
+  [[ -n $CLAUDE_BIN ]] && ok "claude installato ($(tilde $CLAUDE_BIN))" "claude installed ($(tilde $CLAUDE_BIN))" || ko "comando claude non trovato" "claude command not found"
+  if grep -qs '^# >>> double-claude >>>' "$HOME/.zshrc"; then ok "comando $DC_B_CMD in ~/.zshrc" "$DC_B_CMD command in ~/.zshrc"
+  elif grep -qsF -- "$DC_B_CFG" "$HOME/.zshrc" || grep -qsF -- "$(tilde $DC_B_CFG)" "$HOME/.zshrc"; then ok "comando $DC_B_CMD in ~/.zshrc ${_d}(creato a mano)${_r}" "$DC_B_CMD command in ~/.zshrc ${_d}(made by hand)${_r}"
+  else ko "manca il comando $DC_B_CMD" "the $DC_B_CMD command is missing"; hint "double-claude apply shell"; fi
   local al; al=$(grep -nE "^[[:space:]]*alias[[:space:]]+(claude|$DC_B_CMD)=" "$HOME/.zshrc" 2>/dev/null)
-  [[ -n $al ]] && { ko "un alias scavalca le funzioni (riga ${al%%:*} di ~/.zshrc)"; hint "togli quella riga"; }
+  [[ -n $al ]] && { ko "un alias scavalca le funzioni (riga ${al%%:*} di ~/.zshrc)" "an alias overrides the functions (line ${al%%:*} of ~/.zshrc)"; hint "togli quella riga" "remove that line"; }
 
   if has_dirs; then
-    h2 "Cartelle dedicate"
+    h2 "Cartelle dedicate" "Dedicated folders"
     local x lbl d; for x in a b; do
       local -a ds=(${(P)${:-DC_${(U)x}_DIRS}}); [[ $x == a ]] && lbl=$DC_A_LABEL || lbl=$DC_B_LABEL
-      (( $#ds )) || { say "    ${_d}$lbl: nessuna, lavora ovunque tranne nelle cartelle dell'altro${_r}"; continue; }
-      for d in $ds; do [[ -d $d ]] && ok "$lbl lavora solo in $(tilde $d)" || { ko "manca la cartella $(tilde $d) di $lbl"; hint "double-claude apply shell la crea"; }; done
+      (( $#ds )) || { say "    ${_d}$lbl: nessuna, lavora ovunque tranne nelle cartelle dell'altro${_r}" "    ${_d}$lbl: none, works everywhere except in the other's folders${_r}"; continue; }
+      for d in $ds; do [[ -d $d ]] && ok "$lbl lavora solo in $(tilde $d)" "$lbl works only in $(tilde $d)" || { ko "manca la cartella $(tilde $d) di $lbl" "the folder $(tilde $d) of $lbl is missing"; hint "double-claude apply shell la crea" "double-claude apply shell creates it"; }; done
     done
   else
-    h2 "Cartelle dedicate"
-    say "    ${_d}Nessuna: claude e $DC_B_CMD funzionano in ogni cartella. Per sceglierne una: double-claude init.${_r}"
+    h2 "Cartelle dedicate" "Dedicated folders"
+    say "    ${_d}Nessuna: claude e $DC_B_CMD funzionano in ogni cartella. Per sceglierne una: double-claude init.${_r}" "    ${_d}None: claude and $DC_B_CMD work in every folder. To choose one: double-claude init.${_r}"
   fi
 
-  h2 "Chat e cronologia"
+  h2 "Chat e cronologia" "Chats and history"
   local c=${S[chats_b]} h=${S[history_b]} r=${S[registry_b]}
   if (( c + h + r == 0 )); then
-    if has_dirs; then ok "in $DC_A_LABEL non c'è niente di $DC_B_LABEL"
-    else ok "in $DC_A_LABEL non ci sono chat della scheda Code di $DC_B_APP"; fi
-  else ko "in $DC_A_LABEL ci sono dati di $DC_B_LABEL: $c chat, $h righe di cronologia, $r voci di registro"; hint "double-claude apply move"; fi
+    if has_dirs; then ok "in $DC_A_LABEL non c'è niente di $DC_B_LABEL" "there is nothing of $DC_B_LABEL in $DC_A_LABEL"
+    else ok "in $DC_A_LABEL non ci sono chat della scheda Code di $DC_B_APP" "no chats from the Code tab of $DC_B_APP in $DC_A_LABEL"; fi
+  else ko "in $DC_A_LABEL ci sono dati di $DC_B_LABEL: $c chat, $h righe di cronologia, $r voci di registro" "$DC_A_LABEL holds data of $DC_B_LABEL: $c chats, $h history lines, $r registry entries"; hint "double-claude apply move"; fi
 
   if (( $#DC_MCP_MOVE )) || [[ -n ${S[mcp_a]}${S[mcp_b]} ]]; then
-    h2 "Server MCP"
-    say "    ${_d}$DC_A_LABEL: ${S[mcp_a]:-nessuno} · $DC_B_LABEL: ${S[mcp_b]:-nessuno}${_r}"
+    h2 "Server MCP" "MCP servers"
+    say "    ${_d}$DC_A_LABEL: ${S[mcp_a]:-nessuno} · $DC_B_LABEL: ${S[mcp_b]:-nessuno}${_r}" "    ${_d}$DC_A_LABEL: ${S[mcp_a]:-none} · $DC_B_LABEL: ${S[mcp_b]:-none}${_r}"
     local s; for s in $DC_MCP_MOVE; do
-      if [[ " ${S[mcp_a]} " == *" $s "* ]]; then ko "$s è ancora in $DC_A_LABEL"; hint "double-claude apply mcp"
-      elif [[ " ${S[mcp_b]} " == *" $s "* ]]; then ok "$s è solo in $DC_B_LABEL"
-      else warn "$s non c'è in nessuno dei due"; fi
+      if [[ " ${S[mcp_a]} " == *" $s "* ]]; then ko "$s è ancora in $DC_A_LABEL" "$s is still in $DC_A_LABEL"; hint "double-claude apply mcp"
+      elif [[ " ${S[mcp_b]} " == *" $s "* ]]; then ok "$s è solo in $DC_B_LABEL" "$s is only in $DC_B_LABEL"
+      else warn "$s non c'è in nessuno dei due" "$s is in neither"; fi
     done
   fi
 
   if has_mod deny; then
-    h2 "Divieti e letture"
+    h2 "Divieti e letture" "Deny rules and reads"
     local x lbl other; local -a ds
     for x in a b; do
       if [[ $x == a ]]; then lbl=$DC_A_LABEL other=$DC_B_LABEL ds=($DC_A_DIRS); else lbl=$DC_B_LABEL other=$DC_A_LABEL ds=($DC_B_DIRS); fi
       kv "$(settings_of $x settings-check)"
       if [[ -n ${KV[error]:-} ]]; then ko "$lbl: ${KV[error]}"; continue; fi
-      if (( KV[deny_missing] + KV[deny_stale] == 0 )); then ok "$lbl non può leggere i dati di $other"
+      if (( KV[deny_missing] + KV[deny_stale] == 0 )); then ok "$lbl non può leggere i dati di $other" "$lbl can't read the data of $other"
       else
-        (( KV[deny_missing] )) && ko "$lbl: mancano ${KV[deny_missing]} divieti"
-        (( KV[deny_stale] )) && ko "$lbl: ${KV[deny_stale]} divieti di una configurazione precedente da togliere"
+        (( KV[deny_missing] )) && ko "$lbl: mancano ${KV[deny_missing]} divieti" "$lbl: ${KV[deny_missing]} deny rules missing"
+        (( KV[deny_stale] )) && ko "$lbl: ${KV[deny_stale]} divieti di una configurazione precedente da togliere" "$lbl: ${KV[deny_stale]} deny rules from a previous setup to remove"
         hint "double-claude apply deny"
       fi
       if (( $#ds )); then
-        if (( KV[block] && ! KV[dirs_missing] )); then ok "$lbl legge file solo da: $(dirs_of $ds)"
-        else ko "$lbl può leggere file fuori dalle sue cartelle"; hint "double-claude apply deny"; fi
-      elif (( KV[block_ours] )); then ko "$lbl ha ancora il blocco delle letture di una configurazione precedente"; hint "double-claude apply deny"; fi
-      if (( DC_SANDBOX )); then (( KV[sandbox] )) && ok "$lbl: sandbox attivo" || { ko "$lbl: sandbox non attivo"; hint "double-claude apply deny"; }
-      elif (( KV[sandbox_ours] )); then ko "$lbl: sandbox rimasto attivo da una configurazione precedente"; hint "double-claude apply deny"; fi
+        if (( KV[block] && ! KV[dirs_missing] )); then ok "$lbl legge file solo da: $(dirs_of $ds)" "$lbl reads files only from: $(dirs_of $ds)"
+        else ko "$lbl può leggere file fuori dalle sue cartelle" "$lbl can read files outside its folders"; hint "double-claude apply deny"; fi
+      elif (( KV[block_ours] )); then ko "$lbl ha ancora il blocco delle letture di una configurazione precedente" "$lbl still has the read block from a previous setup"; hint "double-claude apply deny"; fi
+      if (( DC_SANDBOX )); then (( KV[sandbox] )) && ok "$lbl: sandbox attivo" "$lbl: sandbox on" || { ko "$lbl: sandbox non attivo" "$lbl: sandbox off"; hint "double-claude apply deny"; }
+      elif (( KV[sandbox_ours] )); then ko "$lbl: sandbox rimasto attivo da una configurazione precedente" "$lbl: sandbox left on by a previous setup"; hint "double-claude apply deny"; fi
     done
     local old; old=$(block_too_old)
-    if has_dirs && [[ -n $old ]]; then ko "Claude Code $old non conosce il blocco delle letture (serve $BLOCK_MIN)"; hint "aggiorna con: claude update"; fi
+    if has_dirs && [[ -n $old ]]; then ko "Claude Code $old non conosce il blocco delle letture (serve $BLOCK_MIN)" "Claude Code $old doesn't know the read block (needs $BLOCK_MIN)"; hint "aggiorna con: claude update" "update with: claude update"; fi
   fi
 
   if has_mod app; then
-    h2 "App Desktop"
-    if [[ ! -d $DC_APP_SRC ]]; then ko "non trovo $DC_APP_SRC"
+    h2 "App Desktop" "Desktop app"
+    if [[ ! -d $DC_APP_SRC ]]; then ko "non trovo $DC_APP_SRC" "can't find $DC_APP_SRC"
     else
       local v; v=$(appver "$DC_CLONE")
       case $(clone_state) in
-        missing) ko "manca la copia dell'app per $DC_B_LABEL"; hint "double-claude apply app";;
-        behind)  warn "la copia ($v) è più vecchia di $DC_A_APP: si aggiorna al prossimo clic sul launcher";;
-        ahead)   ok "copia dell'app per $DC_B_LABEL ($v, più recente di $DC_A_APP: la tengo)";;
-        unknown) warn "non leggo la versione della copia: la lascio com'è";;
-        *)       ok "copia dell'app per $DC_B_LABEL aggiornata ($v)";;
+        missing) ko "manca la copia dell'app per $DC_B_LABEL" "the app copy for $DC_B_LABEL is missing"; hint "double-claude apply app";;
+        behind)  warn "la copia ($v) è più vecchia di $DC_A_APP: si aggiorna al prossimo clic sul launcher" "the copy ($v) is older than $DC_A_APP: it updates on the next launcher click";;
+        ahead)   ok "copia dell'app per $DC_B_LABEL ($v, più recente di $DC_A_APP: la tengo)" "app copy for $DC_B_LABEL ($v, newer than $DC_A_APP: keeping it)";;
+        unknown) warn "non leggo la versione della copia: la lascio com'è" "can't read the copy's version: leaving it as it is";;
+        *)       ok "copia dell'app per $DC_B_LABEL aggiornata ($v)" "app copy for $DC_B_LABEL up to date ($v)";;
       esac
-      [[ -e $DC_CLONE.refreshing || -e $DC_CLONE.previous ]] && warn "un aggiornamento della copia si è interrotto: si sistema al prossimo clic sul launcher"
+      [[ -e $DC_CLONE.refreshing || -e $DC_CLONE.previous ]] && warn "un aggiornamento della copia si è interrotto: si sistema al prossimo clic sul launcher" "an update of the copy was interrupted: it gets fixed on the next launcher click"
       case ${S[updates_b]} in
-        off) ok "la copia non si aggiorna da sola${${(M)S[updates_ours]:#0}:+ ${_d}(blocco già presente in $(tilde $DC_B_3P))${_r}}";;
-        on)  ko "la copia si aggiorna da sola e si riapre sull'account $DC_A_LABEL"
+        off) ok "la copia non si aggiorna da sola${${(M)S[updates_ours]:#0}:+ ${_d}(blocco già presente in $(tilde $DC_B_3P))${_r}}" "the copy doesn't update itself${${(M)S[updates_ours]:#0}:+ ${_d}(block already present in $(tilde $DC_B_3P))${_r}}";;
+        on)  ko "la copia si aggiorna da sola e si riapre sull'account $DC_A_LABEL" "the copy updates itself and reopens on the $DC_A_LABEL account"
              if [[ ${S[updates_ours]} == 1 ]]; then hint "double-claude apply app"
-             else hint "$(tilde $DC_B_3P) non è di double-claude (forse un gateway di inferenza): non la tocco. Blocca gli aggiornamenti lì dentro."; fi;;
-        *)   ko "la copia si aggiorna da sola e si riapre sull'account $DC_A_LABEL"; hint "double-claude apply app";;
+             else hint "$(tilde $DC_B_3P) non è di double-claude (forse un gateway di inferenza): non la tocco. Blocca gli aggiornamenti lì dentro." "$(tilde $DC_B_3P) is not from double-claude (maybe an inference gateway): leaving it alone. Block updates in there."; fi;;
+        *)   ko "la copia si aggiorna da sola e si riapre sull'account $DC_A_LABEL" "the copy updates itself and reopens on the $DC_A_LABEL account"; hint "double-claude apply app";;
       esac
-      [[ -n $(strays) ]] && { ko "$DC_B_APP è aperta senza il suo profilo e mostra l'account $DC_A_LABEL"; hint "chiudila con ⌘Q e riaprila dal launcher $DC_B_APP"; }
-      dock_has_clone && { ko "nel Dock è fissata la copia di $DC_B_APP, non il launcher: da lì si apre sull'account $DC_A_LABEL"
-        hint "tasto destro sull'icona nel Dock → Opzioni → Rimuovi dal Dock$( (( DC_LAUNCHER_HIDE )) && print ', poi apri da Spotlight' || print ', poi fissa il launcher')"; }
+      [[ -n $(strays) ]] && { ko "$DC_B_APP è aperta senza il suo profilo e mostra l'account $DC_A_LABEL" "$DC_B_APP is open without its profile and shows the $DC_A_LABEL account"; hint "chiudila con ⌘Q e riaprila dal launcher $DC_B_APP" "quit it with ⌘Q and reopen it from the $DC_B_APP launcher"; }
+      dock_has_clone && { ko "nel Dock è fissata la copia di $DC_B_APP, non il launcher: da lì si apre sull'account $DC_A_LABEL" "the $DC_B_APP copy is pinned in the Dock, not the launcher: from there it opens on the $DC_A_LABEL account"
+        hint "tasto destro sull'icona nel Dock → Opzioni → Rimuovi dal Dock$( (( DC_LAUNCHER_HIDE )) && print ', poi apri da Spotlight' || print ', poi fissa il launcher')" "right-click the Dock icon → Options → Remove from Dock$( (( DC_LAUNCHER_HIDE )) && print ', then open from Spotlight' || print ', then pin the launcher')"; }
       local L="$HOME/Applications/$DC_B_APP.app" m=''
       [[ -f $L/Contents/Resources/double-claude ]] && m=$(<$L/Contents/Resources/double-claude)
-      if [[ ! -d $L ]]; then ko "manca il launcher $DC_B_APP"; hint "double-claude apply app"
-      elif [[ $m == *' '* ]]; then ok "il launcher $DC_B_APP passa CLAUDE_CONFIG_DIR"
-      elif [[ -n $m ]]; then warn "il launcher $DC_B_APP è della versione 1.0: lavora in background e da macOS 27 può fermarsi a metà"; hint "double-claude apply app"
+      if [[ ! -d $L ]]; then ko "manca il launcher $DC_B_APP" "the $DC_B_APP launcher is missing"; hint "double-claude apply app"
+      elif [[ $m == *' '* ]]; then ok "il launcher $DC_B_APP passa CLAUDE_CONFIG_DIR" "the $DC_B_APP launcher passes CLAUDE_CONFIG_DIR"
+      elif [[ -n $m ]]; then warn "il launcher $DC_B_APP è della versione 1.0: lavora in background e da macOS 27 può fermarsi a metà" "the $DC_B_APP launcher is from version 1.0: it runs in the background and since macOS 27 it can stop halfway"; hint "double-claude apply app"
       else
-        warn "il launcher $DC_B_APP non è di double-claude: verifica che passi CLAUDE_CONFIG_DIR"
+        warn "il launcher $DC_B_APP non è di double-claude: verifica che passi CLAUDE_CONFIG_DIR" "the $DC_B_APP launcher is not from double-claude: check that it passes CLAUDE_CONFIG_DIR"
         local scpt=$L/Contents/Resources/Scripts/main.scpt
         if whence -p osadecompile >/dev/null && [[ -f $scpt ]] && osadecompile "$scpt" 2>/dev/null | grep -qE '&[[:space:]]*\\?"'; then
-          warn "lancia in background (&): da macOS 27 l'aggiornamento della copia può restare a metà"
+          warn "lancia in background (&): da macOS 27 l'aggiornamento della copia può restare a metà" "it runs in the background (&): since macOS 27 updating the copy can stop halfway"
         fi
-        hint "double-claude apply app lo sostituisce (il vecchio va nel backup)"
+        hint "double-claude apply app lo sostituisce (il vecchio va nel backup)" "double-claude apply app replaces it (the old one goes into the backup)"
       fi
-      [[ -d $DC_B_DATA ]] && ok "$DC_B_APP ha i suoi dati" || { warn "$DC_B_APP non è mai stata aperta"; hint "aprila da Spotlight e fai il login con l'account $DC_B_LABEL"; }
+      [[ -d $DC_B_DATA ]] && ok "$DC_B_APP ha i suoi dati" "$DC_B_APP has its own data" || { warn "$DC_B_APP non è mai stata aperta" "$DC_B_APP has never been opened"; hint "aprila da Spotlight e fai il login con l'account $DC_B_LABEL" "open it from Spotlight and sign in with the $DC_B_LABEL account"; }
     fi
-    say "    ${_d}Controllo a mano: nella scheda Code di $DC_B_APP scrivi «esegui echo \$CLAUDE_CONFIG_DIR».${_r}"
-    say "    ${_d}Deve rispondere $DC_B_CFG.${_r}"
+    say "    ${_d}Controllo a mano: nella scheda Code di $DC_B_APP scrivi «esegui echo \$CLAUDE_CONFIG_DIR».${_r}" "    ${_d}Manual check: in the Code tab of $DC_B_APP type «run echo \$CLAUDE_CONFIG_DIR».${_r}"
+    say "    ${_d}Deve rispondere $DC_B_CFG.${_r}" "    ${_d}It must answer $DC_B_CFG.${_r}"
   fi
 
   print
-  if (( DC_TODO == 0 )); then say "${_g}${_b}Tutto separato.${_r}"
-  else say "${_b}$DC_TODO $( (( DC_TODO == 1 )) && print cosa || print cose ) da sistemare.${_r} Segui le frecce →, poi rilancia ${_b}double-claude doctor${_r}."; fi
+  if (( DC_TODO == 0 )); then say "${_g}${_b}Tutto separato.${_r}" "${_g}${_b}All separated.${_r}"
+  else say "${_b}$DC_TODO $( (( DC_TODO == 1 )) && print cosa || print cose ) da sistemare.${_r} Segui le frecce →, poi rilancia ${_b}double-claude doctor${_r}." "${_b}$DC_TODO $( (( DC_TODO == 1 )) && print thing || print things ) to fix.${_r} Follow the arrows →, then run ${_b}double-claude doctor${_r} again."; fi
 }
 
 cmd_plan() {
   need_conf; load
-  h1 "double-claude · piano  ${_d}niente viene modificato${_r}"
-  say "  ${_d}Prima di tutto: backup in $(tilde $DC_HOME_CFG/backups)${_r}"
+  h1 "double-claude · piano  ${_d}niente viene modificato${_r}" "double-claude · plan  ${_d}nothing is changed${_r}"
+  say "  ${_d}Prima di tutto: backup in $(tilde $DC_HOME_CFG/backups)${_r}" "  ${_d}First of all: backup in $(tilde $DC_HOME_CFG/backups)${_r}"
   if has_mod shell; then
-    h2 "shell · comando $DC_B_CMD"
-    say "  Crea $(tilde $DC_B_CFG) e aggiunge questo blocco a ~/.zshrc:"
+    h2 "shell · comando $DC_B_CMD" "shell · $DC_B_CMD command"
+    say "  Crea $(tilde $DC_B_CFG) e aggiunge questo blocco a ~/.zshrc:" "  Creates $(tilde $DC_B_CFG) and adds this block to ~/.zshrc:"
     local -a todo=(); local d; for d in $DC_A_DIRS $DC_B_DIRS; do [[ -d $d ]] || todo+=("$(tilde $d)"); done
-    (( $#todo )) && say "  Crea anche le cartelle dedicate: ${(j:, :)todo}"
+    (( $#todo )) && say "  Crea anche le cartelle dedicate: ${(j:, :)todo}" "  Also creates the dedicated folders: ${(j:, :)todo}"
     zsh_block | sed 's/^/    /'
   fi
   if has_mod move; then
-    h2 "move · chat e cronologia"
+    h2 "move · chat e cronologia" "move · chats and history"
     DC_DRY=1 engine move | sed 's/^/  /'
   fi
   if has_mod mcp && (( $#DC_MCP_MOVE )); then
-    h2 "mcp · server"
-    say "  Da $DC_A_LABEL a $DC_B_LABEL: ${DC_MCP_MOVE[*]}"
+    h2 "mcp · server" "mcp · servers"
+    say "  Da $DC_A_LABEL a $DC_B_LABEL: ${DC_MCP_MOVE[*]}" "  From $DC_A_LABEL to $DC_B_LABEL: ${DC_MCP_MOVE[*]}"
   fi
   if has_mod deny; then
-    h2 "deny · divieti e letture"
-    say "  $DC_A_LABEL non tocca:"; rules_a | sed 's/^/    /'
-    say "  $DC_B_LABEL non tocca:"; rules_b | sed 's/^/    /'
-    (( $#DC_A_DIRS )) && say "  $DC_A_LABEL legge file solo da: $(dirs_of $DC_A_DIRS)"
-    (( $#DC_B_DIRS )) && say "  $DC_B_LABEL legge file solo da: $(dirs_of $DC_B_DIRS)"
-    (( DC_SANDBOX )) && say "  Sandbox per i comandi Bash dei due profili"
+    h2 "deny · divieti e letture" "deny · deny rules and reads"
+    say "  $DC_A_LABEL non tocca:" "  $DC_A_LABEL doesn't touch:"; rules_a | sed 's/^/    /'
+    say "  $DC_B_LABEL non tocca:" "  $DC_B_LABEL doesn't touch:"; rules_b | sed 's/^/    /'
+    (( $#DC_A_DIRS )) && say "  $DC_A_LABEL legge file solo da: $(dirs_of $DC_A_DIRS)" "  $DC_A_LABEL reads files only from: $(dirs_of $DC_A_DIRS)"
+    (( $#DC_B_DIRS )) && say "  $DC_B_LABEL legge file solo da: $(dirs_of $DC_B_DIRS)" "  $DC_B_LABEL reads files only from: $(dirs_of $DC_B_DIRS)"
+    (( DC_SANDBOX )) && say "  Sandbox per i comandi Bash dei due profili" "  Sandbox for the Bash commands of both profiles"
   fi
   if has_mod app; then
-    h2 "app · seconda app Desktop"
-    say "  Copia:     $(tilde $DC_CLONE)"
-    say "  Dati:      $(tilde $DC_B_DATA)"
-    say "  Launcher:  ~/Applications/$DC_A_APP.app, ~/Applications/$DC_B_APP.app $( (( DC_LAUNCHER_HIDE )) && print '(fuori dal Dock)' || print '(si possono fissare nel Dock)')"
-    if [[ -d $DC_B_3P && ! -f $DC_B_3P/.double-claude ]]; then say "  Aggiornamenti: $(tilde $DC_B_3P) esiste già e non è di double-claude, non la tocco"
-    else say "  Aggiornamenti: bloccati per la copia con una policy in $(tilde $DC_B_3P)"; fi
+    h2 "app · seconda app Desktop" "app · second Desktop app"
+    say "  Copia:     $(tilde $DC_CLONE)" "  Copy:      $(tilde $DC_CLONE)"
+    say "  Dati:      $(tilde $DC_B_DATA)" "  Data:      $(tilde $DC_B_DATA)"
+    say "  Launcher:  ~/Applications/$DC_A_APP.app, ~/Applications/$DC_B_APP.app $( (( DC_LAUNCHER_HIDE )) && print '(fuori dal Dock)' || print '(si possono fissare nel Dock)')" "  Launchers: ~/Applications/$DC_A_APP.app, ~/Applications/$DC_B_APP.app $( (( DC_LAUNCHER_HIDE )) && print '(out of the Dock)' || print '(can be pinned in the Dock)')"
+    if [[ -d $DC_B_3P && ! -f $DC_B_3P/.double-claude ]]; then say "  Aggiornamenti: $(tilde $DC_B_3P) esiste già e non è di double-claude, non la tocco" "  Updates:   $(tilde $DC_B_3P) already exists and is not from double-claude, leaving it alone"
+    else say "  Aggiornamenti: bloccati per la copia con una policy in $(tilde $DC_B_3P)" "  Updates:   blocked for the copy with a policy in $(tilde $DC_B_3P)"; fi
   fi
-  print; hint "per procedere: double-claude apply"
+  print; hint "per procedere: double-claude apply" "to go ahead: double-claude apply"
 }
 
 apply_shell() {
-  h2 "shell · comando $DC_B_CMD"
+  h2 "shell · comando $DC_B_CMD" "shell · $DC_B_CMD command"
   mkdir -p "$DC_B_CFG"
   touch "$HOME/.zshrc"
   strip_block "$HOME/.zshrc"
   [[ -s $HOME/.zshrc && -n "$(tail -c1 "$HOME/.zshrc")" ]] && print >> "$HOME/.zshrc"
   zsh_block >> "$HOME/.zshrc"
-  ok "aggiunto a ~/.zshrc"
+  ok "aggiunto a ~/.zshrc" "added to ~/.zshrc"
   local d; for d in $DC_A_DIRS $DC_B_DIRS; do
-    [[ -d $d ]] || { mkdir -p "$d" && ok "creata la cartella $(tilde $d)"; }
+    [[ -d $d ]] || { mkdir -p "$d" && ok "creata la cartella $(tilde $d)" "created the folder $(tilde $d)"; }
   done
   local al; al=$(grep -nE "^[[:space:]]*alias[[:space:]]+(claude|$DC_B_CMD)=" "$HOME/.zshrc")
-  [[ -n $al ]] && warn "un alias scavalca le funzioni (riga ${al%%:*} di ~/.zshrc): toglilo"
-  hint "apri un nuovo Terminale per usarlo"
+  [[ -n $al ]] && warn "un alias scavalca le funzioni (riga ${al%%:*} di ~/.zshrc): toglilo" "an alias overrides the functions (line ${al%%:*} of ~/.zshrc): remove it"
+  hint "apri un nuovo Terminale per usarlo" "open a new Terminal to use it"
   if [[ ! -f $DC_B_CFG/.claude.json ]] || ! grep -q emailAddress "$DC_B_CFG/.claude.json" 2>/dev/null; then
-    say "  Login di $DC_B_LABEL:"
-    say "    1. nel browser esci da claude.ai (o usa una finestra privata)"
-    say "    2. in un nuovo Terminale: ${_b}cd $(b_start) && $DC_B_CMD${_r}"
-    say "    3. dentro scrivi ${_b}/login${_r} e accedi con l'account $DC_B_LABEL"
+    say "  Login di $DC_B_LABEL:" "  Sign in to $DC_B_LABEL:"
+    say "    1. nel browser esci da claude.ai (o usa una finestra privata)" "    1. in the browser, sign out of claude.ai (or use a private window)"
+    say "    2. in un nuovo Terminale: ${_b}cd $(b_start) && $DC_B_CMD${_r}" "    2. in a new Terminal: ${_b}cd $(b_start) && $DC_B_CMD${_r}"
+    say "    3. dentro scrivi ${_b}/login${_r} e accedi con l'account $DC_B_LABEL" "    3. type ${_b}/login${_r} and sign in with the $DC_B_LABEL account"
   fi
 }
 
 apply_move() {
-  h2 "move · chat e cronologia"
-  has_dirs || say "  ${_d}Senza cartelle dedicate sposto solo le chat della scheda Code di $DC_B_APP.${_r}"
+  h2 "move · chat e cronologia" "move · chats and history"
+  has_dirs || say "  ${_d}Senza cartelle dedicate sposto solo le chat della scheda Code di $DC_B_APP.${_r}" "  ${_d}Without dedicated folders I only move chats from the Code tab of $DC_B_APP.${_r}"
   local r; r=$(running)
   if [[ -n $r ]]; then
-    warn "Claude è aperto e riscrive i suoi file mentre gira:"
+    warn "Claude è aperto e riscrive i suoi file mentre gira:" "Claude is open and rewrites its files while running:"
     print -r -- "$r" | sed 's/^/      /'
-    say "    Chiudi le app con ⌘Q e i Terminali dove gira claude."
-    confirm "Continuo lo stesso?" N || return 1
+    say "    Chiudi le app con ⌘Q e i Terminali dove gira claude." "    Quit the apps with ⌘Q and the Terminals where claude is running."
+    confirm "$(L "Continuo lo stesso?" "Continue anyway?")" N || return 1
   fi
   DC_DRY=1 engine move | sed 's/^/  /'
-  confirm "Sposto?" S || return 0
+  confirm "$(L Sposto? Move?)" S || return 0
   DC_DRY=0 engine move | sed 's/^/  /' | tail -n 1
 }
 
 apply_mcp() {
-  h2 "mcp · server"
-  (( $#DC_MCP_MOVE )) || { ok "nessun server da spostare"; return 0; }
-  [[ -n $CLAUDE_BIN ]] || { ko "comando claude non trovato"; return 1; }
+  h2 "mcp · server" "mcp · servers"
+  (( $#DC_MCP_MOVE )) || { ok "nessun server da spostare" "no servers to move"; return 0; }
+  [[ -n $CLAUDE_BIN ]] || { ko "comando claude non trovato" "claude command not found"; return 1; }
   scan
   local s j
   for s in $DC_MCP_MOVE; do
     j=$(DC_ARG=$s engine mcp-get 2>/dev/null)
     if [[ " ${S[mcp_b]} " != *" $s "* ]]; then
-      [[ -n $j ]] || { warn "$s non è tra i server globali di $DC_A_LABEL"; continue; }
-      if CLAUDE_CONFIG_DIR=$DC_B_CFG "$CLAUDE_BIN" mcp add-json "$s" "$j" -s user >/dev/null 2>&1; then ok "$s aggiunto a $DC_B_LABEL"
-      else ko "$s: non riesco ad aggiungerlo a $DC_B_LABEL"; continue; fi
+      [[ -n $j ]] || { warn "$s non è tra i server globali di $DC_A_LABEL" "$s is not among the global servers of $DC_A_LABEL"; continue; }
+      if CLAUDE_CONFIG_DIR=$DC_B_CFG "$CLAUDE_BIN" mcp add-json "$s" "$j" -s user >/dev/null 2>&1; then ok "$s aggiunto a $DC_B_LABEL" "$s added to $DC_B_LABEL"
+      else ko "$s: non riesco ad aggiungerlo a $DC_B_LABEL" "$s: can't add it to $DC_B_LABEL"; continue; fi
     fi
     if [[ -n $j ]]; then
-      "$CLAUDE_BIN" mcp remove "$s" -s user >/dev/null 2>&1 && ok "$s tolto da $DC_A_LABEL" || ko "$s: non riesco a toglierlo da $DC_A_LABEL"
+      "$CLAUDE_BIN" mcp remove "$s" -s user >/dev/null 2>&1 && ok "$s tolto da $DC_A_LABEL" "$s removed from $DC_A_LABEL" || ko "$s: non riesco a toglierlo da $DC_A_LABEL" "$s: can't remove it from $DC_A_LABEL"
     fi
   done
 }
 
 apply_deny() {
-  h2 "deny · divieti e letture"
+  h2 "deny · divieti e letture" "deny · deny rules and reads"
   local x lbl msg; local -a ds
   for x in a b; do
     if [[ $x == a ]]; then lbl=$DC_A_LABEL ds=($DC_A_DIRS); else lbl=$DC_B_LABEL ds=($DC_B_DIRS); fi
     kv "$(settings_of $x settings)"
     if [[ -n ${KV[error]:-} ]]; then ko "$lbl: ${KV[error]}"; continue; fi
-    msg="$lbl: ${KV[added]} divieti aggiunti"; (( KV[removed] )) && msg+=", ${KV[removed]} tolti perché non servono più"
+    msg="$lbl: $(L "${KV[added]} divieti aggiunti" "${KV[added]} deny rules added")"; (( KV[removed] )) && msg+=$(L ", ${KV[removed]} tolti perché non servono più" ", ${KV[removed]} removed as no longer needed")
     ok "$msg"
-    (( $#ds )) && ok "$lbl legge file solo da: $(dirs_of $ds)"
+    (( $#ds )) && ok "$lbl legge file solo da: $(dirs_of $ds)" "$lbl reads files only from: $(dirs_of $ds)"
   done
   local old; old=$(block_too_old)
-  if has_dirs && [[ -n $old ]]; then warn "Claude Code $old non conosce ancora il blocco delle letture: aggiorna con claude update"; fi
-  if (( DC_SANDBOX )); then ok "sandbox attivo per i comandi Bash dei due profili"; hint "la rete dei comandi passa da un elenco di siti: Claude ti chiede ogni sito nuovo"
-  else hint "i divieti valgono per gli strumenti file e per cat, sed e simili, non per script o grep -r: per quelli c'è il sandbox (double-claude init)"; fi
+  if has_dirs && [[ -n $old ]]; then warn "Claude Code $old non conosce ancora il blocco delle letture: aggiorna con claude update" "Claude Code $old doesn't know the read block yet: update with claude update"; fi
+  if (( DC_SANDBOX )); then ok "sandbox attivo per i comandi Bash dei due profili" "sandbox on for the Bash commands of both profiles"; hint "la rete dei comandi passa da un elenco di siti: Claude ti chiede ogni sito nuovo" "network access for commands goes through an allowlist: Claude asks you about each new site"
+  else hint "i divieti valgono per gli strumenti file e per cat, sed e simili, non per script o grep -r: per quelli c'è il sandbox (double-claude init)" "deny rules apply to file tools and to cat, sed and the like, not to scripts or grep -r: for those there is the sandbox (double-claude init)"; fi
 }
 
 apply_app() {
-  h2 "app · seconda app Desktop"
-  is_mac || { warn "solo su macOS"; return 0; }
-  [[ -d $DC_APP_SRC ]] || { ko "non trovo $DC_APP_SRC"; return 1; }
-  [[ $SELF == */Downloads/* || $SELF == /tmp/* || $SELF == /private/* ]] && warn "i launcher useranno $(tilde $SELF): meglio prima 'double-claude install'"
+  h2 "app · seconda app Desktop" "app · second Desktop app"
+  is_mac || { warn "solo su macOS" "macOS only"; return 0; }
+  [[ -d $DC_APP_SRC ]] || { ko "non trovo $DC_APP_SRC" "can't find $DC_APP_SRC"; return 1; }
+  [[ $SELF == */Downloads/* || $SELF == /tmp/* || $SELF == /private/* ]] && warn "i launcher useranno $(tilde $SELF): meglio prima 'double-claude install'" "launchers will use $(tilde $SELF): better run 'double-claude install' first"
   local r=0
   if build_clone; then
     case $CLONE_DID in
-      missing) ok "copia dell'app in $(tilde ${DC_CLONE:h})";;
-      behind)  ok "copia dell'app aggiornata alla versione di $DC_A_APP";;
-      ahead)   ok "la copia è più recente di $DC_A_APP: la tengo";;
-      unknown) warn "non leggo la versione della copia: la lascio com'è";;
-      *)       ok "copia dell'app già aggiornata";;
+      missing) ok "copia dell'app in $(tilde ${DC_CLONE:h})" "app copy in $(tilde ${DC_CLONE:h})";;
+      behind)  ok "copia dell'app aggiornata alla versione di $DC_A_APP" "app copy updated to the version of $DC_A_APP";;
+      ahead)   ok "la copia è più recente di $DC_A_APP: la tengo" "the copy is newer than $DC_A_APP: keeping it";;
+      unknown) warn "non leggo la versione della copia: la lascio com'è" "can't read the copy's version: leaving it as it is";;
+      *)       ok "copia dell'app già aggiornata" "app copy already up to date";;
     esac
-  else ko "non riesco a copiare l'app: la copia di prima resta com'era"; r=1; fi
+  else ko "non riesco a copiare l'app: la copia di prima resta com'era" "can't copy the app: the previous copy stays as it was"; r=1; fi
   case $(block_updates) in
-    ours)    ok "aggiornamento automatico della copia bloccato";;
-    foreign) warn "$(tilde $DC_B_3P) esiste già e non è di double-claude: non la tocco"
-             hint "se la copia si aggiorna da sola si riapre sull'account $DC_A_LABEL: double-claude doctor lo controlla";;
-    *)       ko "non riesco a bloccare l'aggiornamento automatico della copia"; r=1;;
+    ours)    ok "aggiornamento automatico della copia bloccato" "automatic updates of the copy blocked";;
+    foreign) warn "$(tilde $DC_B_3P) esiste già e non è di double-claude: non la tocco" "$(tilde $DC_B_3P) already exists and is not from double-claude: leaving it alone"
+             hint "se la copia si aggiorna da sola si riapre sull'account $DC_A_LABEL: double-claude doctor lo controlla" "if the copy updates itself it reopens on the $DC_A_LABEL account: double-claude doctor checks it";;
+    *)       ko "non riesco a bloccare l'aggiornamento automatico della copia" "can't block automatic updates of the copy"; r=1;;
   esac
-  mk_launcher "$DC_A_APP" a && ok "launcher ~/Applications/$DC_A_APP.app"
-  mk_launcher "$DC_B_APP" b && ok "launcher ~/Applications/$DC_B_APP.app ${_d}(passa CLAUDE_CONFIG_DIR)${_r}"
-  (( DC_LAUNCHER_HIDE )) && hint "i launcher restano fuori dal Dock: aprili da Spotlight" || hint "per il Dock fissa i launcher, non le app aperte"
-  say "  Primo avvio:"
-  say "    1. chiudi Claude con ⌘Q e nel browser esci da claude.ai"
-  say "    2. apri ${_b}$DC_B_APP${_r} da Spotlight e accedi con l'account $DC_B_LABEL"
-  say "    3. da ora apri sempre ${_b}$DC_A_APP${_r} e ${_b}$DC_B_APP${_r} dai launcher"
-  say "    4. nascondi /Applications/Claude.app da Spotlight (Impostazioni di Sistema → Spotlight)"
-  say "  ${_d}Per distinguerle nel Dock: Finder → Ottieni informazioni sulla copia → trascina un'icona su quella in alto.${_r}"
+  mk_launcher "$DC_A_APP" a && ok "launcher ~/Applications/$DC_A_APP.app" "launcher ~/Applications/$DC_A_APP.app"
+  mk_launcher "$DC_B_APP" b && ok "launcher ~/Applications/$DC_B_APP.app ${_d}(passa CLAUDE_CONFIG_DIR)${_r}" "launcher ~/Applications/$DC_B_APP.app ${_d}(passes CLAUDE_CONFIG_DIR)${_r}"
+  (( DC_LAUNCHER_HIDE )) && hint "i launcher restano fuori dal Dock: aprili da Spotlight" "launchers stay out of the Dock: open them from Spotlight" || hint "per il Dock fissa i launcher, non le app aperte" "for the Dock, pin the launchers, not the open apps"
+  say "  Primo avvio:" "  First launch:"
+  say "    1. chiudi Claude con ⌘Q e nel browser esci da claude.ai" "    1. quit Claude with ⌘Q and sign out of claude.ai in the browser"
+  say "    2. apri ${_b}$DC_B_APP${_r} da Spotlight e accedi con l'account $DC_B_LABEL" "    2. open ${_b}$DC_B_APP${_r} from Spotlight and sign in with the $DC_B_LABEL account"
+  say "    3. da ora apri sempre ${_b}$DC_A_APP${_r} e ${_b}$DC_B_APP${_r} dai launcher" "    3. from now on always open ${_b}$DC_A_APP${_r} and ${_b}$DC_B_APP${_r} from the launchers"
+  say "    4. nascondi /Applications/Claude.app da Spotlight (Impostazioni di Sistema → Spotlight)" "    4. hide /Applications/Claude.app from Spotlight (System Settings → Spotlight)"
+  say "  ${_d}Per distinguerle nel Dock: Finder → Ottieni informazioni sulla copia → trascina un'icona su quella in alto.${_r}" "  ${_d}To tell them apart in the Dock: Finder → Get Info on the copy → drag an icon onto the one at the top.${_r}"
   return $r
 }
 
 cmd_apply() {
   need_conf; load
   local -a mods=("$@"); (( $#mods )) || mods=($DC_MODULES)
-  local m; for m in $mods; do [[ $m == (shell|move|mcp|deny|app) ]] || die "pezzo sconosciuto: $m (usa shell, move, mcp, deny, app)"; done
+  local m; for m in $mods; do [[ $m == (shell|move|mcp|deny|app) ]] || die "pezzo sconosciuto: $m (usa shell, move, mcp, deny, app)" "unknown piece: $m (use shell, move, mcp, deny, app)"; done
   h1 "double-claude · apply  ${_d}${mods[*]}${_r}"
   do_backup
-  for m in $mods; do apply_$m || warn "$m non completato"; done
-  print; hint "controlla con: double-claude doctor"
+  for m in $mods; do apply_$m || warn "$m non completato" "$m not completed"; done
+  print; hint "controlla con: double-claude doctor" "check with: double-claude doctor"
 }
 
 cmd_open() {
@@ -975,21 +1012,21 @@ cmd_open() {
   case ${1:-} in
     a|$DC_A_LABEL) open_a;;
     b|$DC_B_LABEL) open_b;;
-    *) die "uso: double-claude open $DC_A_LABEL|$DC_B_LABEL";;
+    *) die "uso: double-claude open $DC_A_LABEL|$DC_B_LABEL" "usage: double-claude open $DC_A_LABEL|$DC_B_LABEL";;
   esac
 }
 
 cmd_status() {
   load
-  h1 "double-claude · app aperte"
+  h1 "double-claude · app aperte" "double-claude · open apps"
   local line pid any=0
   while read -r line; do
     [[ -z $line ]] && continue; any=1; pid=${line%% *}
     if [[ $line == *--user-data-dir=* ]]; then say "  ${_o}B${_r} $DC_B_LABEL  ${_d}pid $pid${_r}"
-    elif [[ $line == *"$DC_CLONE/"* ]]; then say "  ${_red}!${_r} $DC_B_APP senza il suo profilo: mostra l'account $DC_A_LABEL  ${_d}pid $pid${_r}"
+    elif [[ $line == *"$DC_CLONE/"* ]]; then say "  ${_red}!${_r} $DC_B_APP senza il suo profilo: mostra l'account $DC_A_LABEL  ${_d}pid $pid${_r}" "  ${_red}!${_r} $DC_B_APP without its profile: shows the $DC_A_LABEL account  ${_d}pid $pid${_r}"
     else say "  ${_a}A${_r} $DC_A_LABEL  ${_d}pid $pid${_r}"; fi
   done < <(ps -A -o pid= -o command= 2>/dev/null | grep -E '\.app/Contents/MacOS/Claude( --|$)' | grep -v grep | sed 's/^ *//')
-  (( any )) || say "  ${_d}nessuna app Claude aperta${_r}"
+  (( any )) || say "  ${_d}nessuna app Claude aperta${_r}" "  ${_d}no Claude app open${_r}"
 }
 
 cmd_backup() { load; h1 "double-claude · backup"; do_backup; }
@@ -997,27 +1034,31 @@ cmd_backup() { load; h1 "double-claude · backup"; do_backup; }
 cmd_restore() {
   load
   local -a all=($DC_HOME_CFG/backups/*.noindex(N/nOn))
-  (( $#all )) || die "nessun backup in $(tilde $DC_HOME_CFG/backups)"
+  (( $#all )) || die "nessun backup in $(tilde $DC_HOME_CFG/backups)" "no backups in $(tilde $DC_HOME_CFG/backups)"
   h1 "double-claude · restore"
   local i=1 b; for b in $all; do say "  $i) ${b:t:r}"; (( i++ )); done
-  local n; ask n "Quale?" 1
-  local src=${all[$n]}; [[ -d $src ]] || die "scelta non valida"
-  [[ -z $(running) ]] || die "chiudi prima le app Claude e i Terminali dove gira claude."
-  confirm "Riporto tutto a ${src:t:r}? Prima salvo lo stato attuale." S || return 0
+  local n; ask n "$(L Quale? Which?)" 1
+  local src=${all[$n]}; [[ -d $src ]] || die "scelta non valida" "invalid choice"
+  [[ -z $(running) ]] || die "chiudi prima le app Claude e i Terminali dove gira claude." "first quit the Claude apps and the Terminals where claude is running."
+  confirm "$(L "Riporto tutto a ${src:t:r}? Prima salvo lo stato attuale." "Restore everything to ${src:t:r}? I save the current state first.")" S || return 0
   do_backup "$src"
   [[ -d $src/claude ]]      && { rm -rf "$DC_A_CFG"; cpc "$src/claude" "$DC_A_CFG"; ok "~/.claude"; }
   [[ -f $src/claude.json ]] && { rm -f "$DC_A_JSON"; cpc "$src/claude.json" "$DC_A_JSON"; ok "~/.claude.json"; }
   [[ -f $src/zshrc ]]       && { cp -p "$src/zshrc" "$HOME/.zshrc"; ok "~/.zshrc"; }
   if [[ -f $src/state.json ]]; then cp -p "$src/state.json" "$DC_HOME_CFG/state.json"; else rm -f "$DC_HOME_CFG/state.json"; fi
   if [[ -d $src/profile-b ]]; then rm -rf "$DC_B_CFG"; cpc "$src/profile-b" "$DC_B_CFG"; ok "$(tilde $DC_B_CFG)"
-  elif [[ -d $DC_B_CFG ]]; then rm -rf "$DC_B_CFG"; ok "$(tilde $DC_B_CFG) tolta: in quel backup non esisteva ancora"; fi
-  hint "lo stato di prima è nel backup appena fatto: $(tilde $BK)"
+  elif [[ -d $DC_B_CFG ]]; then rm -rf "$DC_B_CFG"; ok "$(tilde $DC_B_CFG) tolta: in quel backup non esisteva ancora" "$(tilde $DC_B_CFG) removed: it didn't exist yet in that backup"; fi
+  hint "lo stato di prima è nel backup appena fatto: $(tilde $BK)" "the previous state is in the backup just made: $(tilde $BK)"
 }
 
 # ================================================================ avvio
-local -a args
-for a in "$@"; do case $a in -y|--yes) DC_YES=1;; *) args+=("$a");; esac; done
+local -a args; local want_lang=0
+for a in "$@"; do
+  if (( want_lang )); then DC_LANG_FORCE=$a; want_lang=0; continue; fi
+  case $a in -y|--yes) DC_YES=1;; --lang) want_lang=1;; --lang=*) DC_LANG_FORCE=${a#--lang=};; *) args+=("$a");; esac
+done
 set -- "${args[@]}"
+if [[ -n $DC_LANG_FORCE ]]; then DC_UI=$(lang_of $DC_LANG_FORCE); else DC_UI=$(system_lang); fi
 case ${1:-help} in
   init)       cmd_init;;
   doctor)     cmd_doctor;;

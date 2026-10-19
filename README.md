@@ -1,121 +1,129 @@
 # Double Claude
 
-Due account Claude sullo stesso Mac, senza che si mescolino.
+**English** · [Italiano](README.it.md)
 
-Chi usa Claude con un account di lavoro e uno personale scopre presto che i due si sovrappongono: le chat finiscono nel profilo sbagliato, un server MCP personale compare al lavoro, la scheda Code dell'app personale legge la configurazione di lavoro. `double-claude` separa i due profili su quattro livelli e controlla che restino separati.
+Two Claude accounts on the same Mac, without mixing them up.
 
-| Livello | Cosa si mescola | Come si separa |
+If you use Claude with a work account and a personal one, you soon find out the two overlap: chats end up in the wrong profile, a personal MCP server shows up at work, the Code tab of the personal app reads the work configuration. `double-claude` separates the two profiles on four levels and checks that they stay separated.
+
+| Level | What gets mixed | How it gets separated |
 |---|---|---|
-| Account | il login va all'app sbagliata | login dal browser, uno alla volta |
-| App Desktop | una sola app, un solo account | seconda copia dell'app con `--user-data-dir` |
-| Claude Code | chat, MCP, impostazioni in `~/.claude` | `CLAUDE_CONFIG_DIR`, anche nella scheda Code dell'app |
-| Cartelle | ognuno legge i file dell'altro | divieti `Read`/`Edit` e, se vuoi, cartelle dedicate |
+| Account | the sign-in goes to the wrong app | sign in from the browser, one at a time |
+| Desktop app | one app, one account | a second copy of the app with `--user-data-dir` |
+| Claude Code | chats, MCP, settings in `~/.claude` | `CLAUDE_CONFIG_DIR`, also in the app's Code tab |
+| Folders | each one reads the other's files | `Read`/`Edit` deny rules and, if you want, dedicated folders |
 
-## Installazione
+## Install
 
-Nel Terminale:
+In the Terminal:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/francescocolombo/double-claude/main/double-claude -o /tmp/double-claude && zsh /tmp/double-claude install
 ```
 
-Il comando scarica un solo file, [`double-claude`](double-claude), lo controlla e lo copia in `~/.local/bin`. Poi:
+The command downloads a single file, [`double-claude`](double-claude), checks it and copies it to `~/.local/bin`. Then:
 
 ```sh
-double-claude init      # qualche domanda, salva la configurazione
-double-claude doctor    # controlla cosa è separato e cosa no, senza modificare niente
+double-claude init      # a few questions, saves the configuration
+double-claude doctor    # checks what is separated and what isn't, without changing anything
 ```
 
-Per disinstallarlo basta cancellare `~/.local/bin/double-claude` e la cartella `~/.config/double-claude`.
+To uninstall, delete `~/.local/bin/double-claude` and the `~/.config/double-claude` folder.
 
-Requisiti: macOS, zsh (predefinita), Claude Code installato. Non servono altri programmi: la parte che legge e scrive i JSON gira con JavaScript for Automation, già presente in macOS.
+Requirements: macOS, zsh (the default shell), Claude Code installed. No other programs needed: the part that reads and writes JSON runs on JavaScript for Automation, which ships with macOS.
 
-## Comandi
+**Language:** Double Claude speaks English, and Italian if your Mac is set to Italian. To choose: `--lang en` or `--lang it` on any command, or `DC_LANG=en` in `~/.config/double-claude/config`.
 
-| Comando | Cosa fa |
+## Commands
+
+| Command | What it does |
 |---|---|
-| `init` | configura i due profili con qualche domanda (le cartelle dedicate sono facoltative) |
-| `doctor` | controlla cosa è già separato e cosa no, senza modificare niente |
-| `plan` | mostra cosa farebbe `apply` |
-| `apply [pezzi]` | separa tutto, oppure solo `shell`, `move`, `mcp`, `deny`, `app` |
-| `open NOME` | apre l'app del profilo giusto (lo usano i launcher) |
-| `status` | mostra le app Claude aperte e il loro profilo |
-| `backup` / `restore` | salva una copia e torna indietro |
+| `init` | sets up the two profiles with a few questions (dedicated folders are optional) |
+| `doctor` | checks what is already separated and what isn't, without changing anything |
+| `plan` | shows what `apply` would do |
+| `apply [parts]` | separates everything, or only `shell`, `move`, `mcp`, `deny`, `app` |
+| `open NAME` | opens the right profile's app (the launchers use it) |
+| `status` | shows the open Claude apps and their profile |
+| `backup` / `restore` | saves a copy and goes back to it |
 
-`apply` fa sempre un backup prima di cambiare qualcosa, in `~/.config/double-claude/backups`. Su macOS è una copia APFS istantanea, che occupa spazio solo per quello che cambia dopo; si tengono gli ultimi 5.
+`apply` always makes a backup before changing anything, in `~/.config/double-claude/backups`. On macOS it's an instant APFS copy that only takes space for what changes afterwards; the last 5 are kept.
 
-## Account e profili
+## Accounts and profiles
 
-- **Account**: l'email con cui entri in Claude.
-- **Profilo**: dove Claude tiene chat, impostazioni e server MCP su questo Mac. Il primo è `~/.claude` con l'app Claude; il secondo è `~/.claude-<nome>` con la sua copia dell'app.
+- **Account**: the email you sign in to Claude with.
+- **Profile**: where Claude keeps chats, settings and MCP servers on this Mac. The first one is `~/.claude` with the Claude app; the second one is `~/.claude-<name>` with its own copy of the app.
 
-Double Claude dà a ogni account il suo profilo.
+Double Claude gives each account its own profile.
 
-## Cartelle dedicate (facoltative)
+## Dedicated folders (optional)
 
-Un profilo con una cartella dedicata lavora solo lì: il suo comando parte solo dentro quella cartella, i suoi strumenti file leggono solo da lì e l'altro profilo non può leggerla. `init` propone quattro scelte:
+A profile with a dedicated folder works only there: its command starts only inside that folder, its file tools read only from there, and the other profile can't read it. `init` offers four choices:
 
-1. nessuna cartella dedicata: i due comandi funzionano ovunque;
-2. il secondo profilo lavora solo in `~/Documents/<nome>`, il primo ovunque tranne lì;
-3. il primo profilo lavora solo in `~/Documents/<nome>`, il secondo ovunque tranne lì;
-4. una cartella per ciascuno: ognuno lavora solo nella sua.
+1. no dedicated folder: both commands work everywhere;
+2. the second profile works only in `~/Documents/<name>`, the first one everywhere else;
+3. the first profile works only in `~/Documents/<name>`, the second one everywhere else;
+4. one folder each: each profile works only in its own.
 
-Il percorso si può cambiare, e le cartelle che non esistono le crea `apply`.
+The path can be changed, and `apply` creates the folders that don't exist.
 
-Il blocco delle letture usa `permissions.blockReadsOutsideWorkingDirectories` di Claude Code (dalla versione 2.1.257) e vale anche nella scheda Code dell'app: Read, Grep e Glob rifiutano i file fuori dalle cartelle del profilo. I comandi Bash che leggono fuori chiedono il permesso; con il sandbox sono bloccati.
+The read block uses Claude Code's `permissions.blockReadsOutsideWorkingDirectories` (version 2.1.257 or later) and also applies in the app's Code tab: Read, Grep and Glob refuse files outside the profile's folders. Bash commands that read outside ask for permission; with the sandbox they are blocked.
 
-Le cartelle dedicate servono anche a capire di chi sono le chat già mescolate. Senza cartelle dedicate `apply move` sposta solo le chat nate nella scheda Code della seconda app, che hanno la cartella dentro i dati di quell'app. Le cartelle si possono aggiungere più avanti rilanciando `init`: Double Claude ricorda cosa ha scritto nelle impostazioni e toglie quello che non serve più, senza toccare le regole tue.
+Dedicated folders also tell whose chats are already mixed. Without dedicated folders, `apply move` moves only the chats started in the Code tab of the second app, whose folder sits inside that app's data. You can add folders later by running `init` again: Double Claude remembers what it wrote in the settings and removes what's no longer needed, without touching your own rules.
 
-## Sandbox (facoltativo)
+## Sandbox (optional)
 
-I divieti valgono per gli strumenti file di Claude Code e per i comandi che nominano un file, come `cat`, `head`, `sed` e i redirect. Non fermano uno script Python o Node, né `grep -r`. Il sandbox di Claude Code applica gli stessi divieti a ogni comando, a livello di sistema. Il prezzo: la rete dei comandi passa da un elenco di siti consentiti, che parte vuoto, e Claude chiede ogni sito nuovo. `init` lo propone, spento di predefinito.
+Deny rules apply to Claude Code's file tools and to commands that name a file, like `cat`, `head`, `sed` and redirects. They don't stop a Python or Node script, or `grep -r`. Claude Code's sandbox applies the same rules to every command, at the system level. The cost: network access for commands goes through an allowlist that starts empty, and Claude asks you about each new site. `init` offers it, off by default.
 
-## La seconda app
+## The second app
 
-- La copia dell'app non si aggiorna da sola: un aggiornamento la riavvierebbe sull'account sbagliato. `apply app` scrive una policy locale nella cartella `<dati>-3p`, ma solo se la cartella non esiste: se c'è già (per esempio per un gateway di inferenza), non la tocca e `doctor` lo segnala.
-- Al clic sul launcher, la copia si rifà solo se è più vecchia di Claude.app. Se è più recente o la versione non si legge, resta. La copia nuova nasce accanto e prende il posto della vecchia solo quando è completa.
-- Il launcher aspetta che il lavoro sia finito: da macOS 27 i processi avviati da un'app che si chiude vengono interrotti.
-- Ogni launcher ha un identificativo suo e l'icona di Claude. `init` chiede se tenerli fuori dal Dock (si aprono da Spotlight) oppure no (si possono fissare nel Dock).
-- Se la copia è già aperta senza il suo profilo, il launcher chiede se chiuderla e riaprirla nel modo giusto. `doctor` controlla anche la copia fissata nel Dock e lo stesso account nelle due app.
+- The app copy doesn't update itself: an update would restart it on the wrong account. `apply app` writes a local policy in the `<data>-3p` folder, but only if the folder doesn't exist: if it's already there (for example for an inference gateway), it leaves it alone and `doctor` reports it.
+- When you click the launcher, the copy is rebuilt only if it's older than Claude.app. If it's newer, or its version can't be read, it stays. The new copy is built next to the old one and replaces it only when it's complete.
+- The launcher waits for the work to finish: since macOS 27, processes started by an app that quits are stopped.
+- Each launcher has its own identifier and Claude's icon. `init` asks whether to keep them out of the Dock (open them from Spotlight) or not (they can be pinned to the Dock).
+- If the copy is already open without its profile, the launcher asks whether to quit it and reopen it the right way. `doctor` also checks for the copy pinned in the Dock and for the same account in both apps.
 
-## Da dove parti
+## Where you start from
 
-- **Un solo account, ne aggiungi un secondo.** `init` → `apply`. Lo spostamento delle chat è facoltativo.
-- **Due account, un solo profilo.** `init` → `plan` → `apply`. Con una cartella dedicata, le chat e la cronologia del secondo account passano nel suo profilo; senza, restano dove sono.
-- **Due profili, ma qualcosa passa dall'uno all'altro.** `init` → `doctor`, poi solo i pezzi indicati con ✗.
+- **One account, adding a second one.** `init` → `apply`. Moving chats is optional.
+- **Two accounts, one profile.** `init` → `plan` → `apply`. With a dedicated folder, the second account's chats and history move to its profile; without one, only the chats started in the second app's Code tab move.
+- **Two profiles, but something leaks between them.** `init` → `doctor`, then only the parts marked with ✗.
 
-## Caso d'uso
+## Use case
 
-Un designer usa Claude con l'account aziendale per i progetti in `~/Documents/work` e con quello personale per tutto il resto. Ha già due app, ma:
+A designer uses Claude with the company account for the projects in `~/Documents/work` and with the personal account for everything else. They already have two apps, but:
 
-- la scheda Code dell'app personale salva le chat nel profilo di lavoro;
-- un server MCP personale compare anche nelle sessioni di lavoro;
-- la cronologia del Terminale contiene i progetti di entrambi.
+- the personal app's Code tab saves chats in the work profile;
+- a personal MCP server also shows up in work sessions;
+- the Terminal history holds the projects of both.
 
-Con `init` sceglie "work" e "personal" e sceglie che work lavori solo in `~/Documents/work`. `doctor` mostra quattro ✗. `apply` sposta le chat e la cronologia personali, sposta il server MCP, scrive i divieti e rifà il launcher dell'app personale con `CLAUDE_CONFIG_DIR`. Un secondo `doctor` dà tutti ✓.
+With `init` they pick "work" and "personal" and choose that work works only in `~/Documents/work`. `doctor` shows four ✗. `apply` moves the personal chats and history, moves the MCP server, writes the deny rules and rebuilds the personal app's launcher with `CLAUDE_CONFIG_DIR`. A second `doctor` shows all ✓.
 
-Risultato:
+Result:
 
 ```
-claude          funziona solo dentro ~/Documents/work, account aziendale
-claude-personal funziona ovunque tranne lì, account personale, config ~/.claude-personal
-Claude          app di lavoro
-Claude Personal seconda app, dati e scheda Code propri
+claude          works only inside ~/Documents/work, company account
+claude-personal works everywhere else, personal account, config ~/.claude-personal
+Claude          work app
+Claude Personal second app, with its own data and Code tab
 ```
 
-## Trappole note
+## Known pitfalls
 
-- Il login passa dal browser: prima esci da claude.ai e tieni chiusa l'altra app.
-- `CLAUDE_CONFIG_DIR` vale solo all'avvio: dopo un cambio chiudi l'app con ⌘Q.
-- Le due app hanno lo stesso identificativo: apri sempre dai launcher, non dalla copia fissata nel Dock.
-- I divieti non fermano script e `grep -r`: per quelli serve il sandbox.
-- Restano in comune il programma `claude`, la chiave nel Portachiavi, log e cache dell'app. Per un muro totale serve un secondo utente macOS.
+- Sign-in goes through the browser: sign out of claude.ai first and keep the other app closed.
+- `CLAUDE_CONFIG_DIR` is read only at startup: after a change, quit the app with ⌘Q.
+- The two apps share the same identifier: always open them from the launchers, not from the copy pinned in the Dock.
+- Deny rules don't stop scripts and `grep -r`: for those you need the sandbox.
+- Some things stay shared: the `claude` program, the app's key in the Keychain, the app's logs and caches. For a complete wall you need a second macOS user.
 
-## Test
+## Tests
 
 ```sh
-zsh tests/run.sh                  # motore JSON con node, gira anche su Linux
-DC_TEST_JXA=1 zsh tests/run.sh    # su macOS: motore con osascript, come nell'uso reale
+zsh tests/run.sh                  # JSON engine on node, also runs on Linux
+DC_TEST_JXA=1 zsh tests/run.sh    # on macOS: engine on osascript, as in real use
 ```
 
-I test usano una home finta. Gli strumenti di macOS (`osacompile`, `open`, `ps`, `codesign`, il Dock) sono simulati; `plutil` è quello vero, quindi lo scenario dell'app gira solo su macOS. Sul proprio Mac il primo controllo sicuro è `double-claude doctor`, che non modifica niente.
+The tests use a fake home. The macOS tools (`osacompile`, `open`, `ps`, `codesign`, the Dock) are simulated; `plutil` is the real one, so the app scenario runs only on macOS. On your own Mac, the first safe check is `double-claude doctor`, which changes nothing.
+
+## License
+
+MIT

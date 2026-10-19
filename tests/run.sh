@@ -27,6 +27,7 @@ chmod +x $T/bin/claude
 export PATH=$T/bin:$PATH DC_SKIP_RUNNING_CHECK=1 NO_COLOR=1
 [[ -n ${DC_TEST_JXA:-} ]] && unset DC_JS_RUNTIME || export DC_JS_RUNTIME=node
 unset CLAUDE_CONFIG_DIR       # mai la config vera di chi lancia i test
+export DC_LANG=it              # i controlli qui sotto leggono i messaggi in italiano; l'inglese ha il suo scenario
 export DC_APP=$T/nessuna-app   # i test non devono mai vedere la Claude.app vera del Mac
 
 # ---------------------------------------------------------------- scenario 1: due account mescolati, cartella dedicata ad A
@@ -255,6 +256,30 @@ rm "$LB/Contents/Resources/double-claude"; print -r -- 'do shell script "x > /de
 out=$($CS doctor)
 check "doctor: launcher fatto a mano che lavora in background" "[[ \$out == *'non è di double-claude'* && \$out == *'in background'* ]]"
 fi
+
+# ---------------------------------------------------------------- scenario 5: lingua
+print "Scenario 5: lingua"
+export HOME=$T/eve; H=$HOME; mkdir -p $H/Documents/work/app $H/Documents/side; cd $H
+print '{"oauthAccount":{"emailAddress":"eve@example.org"}}' > $H/.claude.json
+out=$(DC_LANG= LANG=en_US.UTF-8 $CS help)
+check "inglese con LANG=en_US" "[[ \$out == *'two Claude accounts on the same Mac'* ]]"
+out=$(DC_LANG= LANG=it_IT.UTF-8 $CS help)
+check "italiano con LANG=it_IT" "[[ \$out == *'due account Claude sullo stesso Mac'* ]]"
+out=$(DC_LANG= LANG=it_IT.UTF-8 $CS --lang en help)
+check "--lang en vince sulla lingua del sistema" "[[ \$out == *'two Claude accounts'* ]]"
+printf '2\nwork\npersonal\n3\n~/Documents/work\ny\ny\nn\n' | DC_LANG=en $CS init > $T/init-en.txt 2>&1
+check "init in inglese" "grep -q 'Where are you starting from' $T/init-en.txt && grep -q 'Dedicated folders' $T/init-en.txt && grep -q 'configuration saved' $T/init-en.txt"
+check "risposte y accettate" "grep -q 'DC_MODULES=(shell move deny' $H/.config/double-claude/config"
+out=$(DC_LANG=en $CS doctor)
+check "doctor in inglese" "[[ \$out == *'Deny rules and reads'* && \$out == *'things to fix'* ]]"
+out=$(DC_LANG=en $CS plan)
+check "plan in inglese, anche il blocco per .zshrc" "[[ \$out == *'nothing is changed'* && \$out == *'works only in ~/Documents/work. Use claude-personal here.'* ]]"
+sed -i.bak 's/^DC_LANG=.*/DC_LANG=it/' $H/.config/double-claude/config
+out=$(DC_LANG= LANG=en_US.UTF-8 $CS doctor)
+check "DC_LANG=it nella configurazione vince sul sistema" "[[ \$out == *'Divieti e letture'* ]]"
+DC_LANG=en $CS --yes apply shell >/dev/null
+r=$(cd $H/Documents/side && zsh -c "source $H/.zshrc; claude x" 2>&1)
+check "messaggio del .zshrc nella lingua di apply" "[[ \$r == *'claude: works only in ~/Documents/work. Use claude-personal here.'* ]]"
 
 print "\n$pass passati, $fail falliti"
 (( fail == 0 ))
