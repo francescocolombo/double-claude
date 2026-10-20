@@ -261,6 +261,13 @@ out=$($CS --yes apply app)
 check "etichette: annunciate da apply" "[[ \$out == *'etichette sulle icone: Work, Personal'* ]]"
 check "etichette: icona del launcher nuova e valida" "! cmp -s '$SRC/Contents/Resources/electron.icns' '$LB/Contents/Resources/applet.icns' && sips -g pixelWidth '$LB/Contents/Resources/applet.icns' >/dev/null 2>&1"
 check "etichette: icona personalizzata sulla copia" "[[ -f '$CL/Icon'$'\\r' ]]"
+cp "$LB/Contents/Resources/applet.icns" $T/classic.icns
+print 'DC_ICON_STYLE=dark' >> $H/.config/double-claude/config
+out=$($CS --yes apply app)
+check "stile scuro senza simbolo nell'app: resta la classica, senza errori" "[[ \$out == *'etichette sulle icone'* ]] && sips -g pixelWidth '$LB/Contents/Resources/applet.icns' >/dev/null 2>&1"
+plan=$($CS plan)
+check "plan: stile dell'icona" "[[ \$plan == *'icona scura'* ]]"
+sed -i.bak '/^DC_ICON_STYLE=dark$/d' $H/.config/double-claude/config
 out=$($CS doctor)
 check "doctor: etichetta sulla copia" "[[ \$out == *'etichetta Personal sull'* ]]"
 rm -rf "$CL"; FAKE_DIALOG=Riapri $CS open b >/dev/null

@@ -16,7 +16,7 @@ setopt extended_glob null_glob pipe_fail
 # CLAUDE_CONFIG_DIR ereditata manderebbe a B i comandi pensati per A.
 unset CLAUDE_CONFIG_DIR
 
-DC_VERSION=1.5.1
+DC_VERSION=1.6.0
 DC_HOME_CFG=${DC_CONFIG_HOME:-$HOME/.config/double-claude}
 DC_CONF=$DC_HOME_CFG/config
 SELF=${0:A}
@@ -93,6 +93,7 @@ defaults() {
   DC_SANDBOX=0             # 1 = sandbox di Claude Code per i comandi Bash dei due profili
   DC_LANG=                 # en | it; vuoto = lingua del Mac
   DC_ICON_LABELS=none      # su quale profilo l'etichetta col nome: none | a | b | both
+  DC_ICON_STYLE=classic    # icona con etichetta: classic (arancione) | dark (scura)
   DC_A_BADGE= DC_B_BADGE=  # testo delle etichette; vuoto = nome del profilo con l'iniziale maiuscola
   DC_KEEP_BACKUPS=5        # quanti backup tenere
   DC_APP_SRC=${DC_APP:-/Applications/Claude.app}
@@ -147,6 +148,7 @@ save_conf() {
     print -r "DC_SANDBOX=${(q)DC_SANDBOX}             # 1 = sandbox per i comandi Bash dei due profili"
     print -r "DC_LANG=${(q)DC_LANG}                # en | it; vuoto = lingua del Mac"
     print -r "DC_ICON_LABELS=${(q)DC_ICON_LABELS}      # etichetta sulle icone: none | a | b | both"
+    print -r "DC_ICON_STYLE=${(q)DC_ICON_STYLE}      # icona con etichetta: classic | dark"
     print -r "DC_A_BADGE=${(q)DC_A_BADGE}               # testo dell'etichetta di A; vuoto = $(badge_text a)"
     print -r "DC_B_BADGE=${(q)DC_B_BADGE}               # testo dell'etichetta di B; vuoto = $(badge_text b)"
   } > "$DC_CONF"
@@ -546,14 +548,33 @@ clear_icon() { set_custom_icon "$1"; icon_broken "$1" && xattr -d com.apple.Find
 badge_text() { if [[ $1 == a ]]; then print -r -- "${DC_A_BADGE:-${(C)DC_A_LABEL}}"; else print -r -- "${DC_B_BADGE:-${(C)DC_B_LABEL}}"; fi; }
 badge_js() { cat <<'JS'
 ObjC.import('AppKit');
+// a: icona .icns di partenza, etichetta, png da scrivere, stile (classic | dark), app da cui prendere il simbolo
+function darkBase(app, S) { // fondo scuro arrotondato e simbolo di Claude: la variante scura dell'icona, uguale su ogni Mac
+  var spark = $.NSBundle.bundleWithPath(app).imageForResource('ClaudeSpark');
+  if (!spark || spark.isNil()) return null;
+  var M = 100, B = S - 2 * M, R = B * 0.26;
+  var body = $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius($.NSMakeRect(M, M, B, B), R, R);
+  $.NSGradient.alloc.initWithStartingColorEndingColor($.NSColor.colorWithSRGBRedGreenBlueAlpha(20/255, 20/255, 20/255, 1), $.NSColor.colorWithSRGBRedGreenBlueAlpha(52/255, 52/255, 52/255, 1)).drawInBezierPathAngle(body, 90);
+  var rim = $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius($.NSMakeRect(M + 3, M + 3, B - 6, B - 6), R - 3, R - 3);
+  $.NSColor.colorWithSRGBRedGreenBlueAlpha(1, 1, 1, 0.22).setStroke; rim.setLineWidth(6); rim.stroke;
+  var k = B * 0.728, tinted = $.NSImage.alloc.initWithSize($.NSMakeSize(k, k));
+  tinted.lockFocus;
+  spark.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, k, k), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
+  $.NSColor.colorWithSRGBRedGreenBlueAlpha(236/255, 96/255, 54/255, 1).set;
+  $.NSRectFillUsingOperation($.NSMakeRect(0, 0, k, k), $.NSCompositingOperationSourceAtop);
+  tinted.unlockFocus;
+  tinted.drawInRectFromRectOperationFraction($.NSMakeRect((S - k) / 2, (S - k) / 2, k, k), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
+  return true;
+}
 function run(a) {
-  var src = a[0], label = a[1], out = a[2], S = 1024;
+  var src = a[0], label = a[1], out = a[2], style = a[3] || 'classic', app = a[4] || '', S = 1024;
   var base = $.NSImage.alloc.initWithContentsOfFile(src);
   if (!base || base.isNil() || !base.isValid) return 'error';
   var rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(null, S, S, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
   var ctx = $.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep);
   $.NSGraphicsContext.saveGraphicsState; $.NSGraphicsContext.setCurrentContext(ctx);
-  base.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, S, S), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
+  if (!(style === 'dark' && app && darkBase(app, S)))   // senza il simbolo nell'app si resta sulla classica
+    base.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, S, S), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
   var fs = 120, font, attrs, size, str = $(label);
   do {
     font = $.NSFont.systemFontOfSizeWeight(fs, $.NSFontWeightBold);
@@ -574,10 +595,10 @@ function run(a) {
 }
 JS
 }
-make_badged_icns() { # make_badged_icns ICNS_DI_PARTENZA ETICHETTA ICNS_NUOVO
+make_badged_icns() { # make_badged_icns ICNS_DI_PARTENZA ETICHETTA ICNS_NUOVO [APP]: lo stile viene da DC_ICON_STYLE
   local t s; t=$(mktemp -d) || return 1
   badge_js > $t/badge.js
-  if [[ $(osascript -l JavaScript $t/badge.js "$1" "$2" $t/b.png 2>/dev/null) != ok ]]; then rm -rf $t; return 1; fi
+  if [[ $(osascript -l JavaScript $t/badge.js "$1" "$2" $t/b.png "$DC_ICON_STYLE" "${4:-$DC_APP_SRC}" 2>/dev/null) != ok ]]; then rm -rf $t; return 1; fi
   mkdir $t/icon.iconset
   for s in 16 32 128 256 512; do
     sips -z $s $s $t/b.png --out $t/icon.iconset/icon_${s}x${s}.png >/dev/null 2>&1
@@ -595,7 +616,7 @@ clone_icon() { # mette (o toglie) l'etichetta sull'icona della copia: è quella 
   if badge_on b; then
     local -a icns=("$DC_CLONE"/Contents/Resources/*.icns(N))
     mkdir -p "${out:h}"
-    (( $#icns )) && make_badged_icns "$icns[1]" "$(badge_text b)" "$out" || return 1
+    (( $#icns )) && make_badged_icns "$icns[1]" "$(badge_text b)" "$out" "$DC_CLONE" || return 1
     set_custom_icon "$DC_CLONE" "$out"
     if [[ ! -e "$DC_CLONE/Icon"$'\r' ]]; then clear_icon "$DC_CLONE"; return 2; fi   # mai lasciare l'icona a metà
     touch "$mark"
@@ -800,6 +821,12 @@ cmd_init() {
       local lc=1; badge_on b && lc=2; badge_on a && lc=3; badge_on a && badge_on b && lc=4
       ask n "$(L Scegli Choose)" $lc
       case $n in 2) DC_ICON_LABELS=b;; 3) DC_ICON_LABELS=a;; 4) DC_ICON_LABELS=both;; *) DC_ICON_LABELS=none;; esac
+      if any_badge; then
+        say "   $(L "Stile dell'icona con etichetta:" "Style of the labeled icon:")"
+        say "   1) $(L "Classica, arancione" "Classic, orange")"; say "   2) $(L "Scura, come Claude in modalità scura" "Dark, like Claude in dark mode")"
+        ask n "$(L Scegli Choose)" $([[ $DC_ICON_STYLE == dark ]] && print 2 || print 1)
+        [[ $n == 2 ]] && DC_ICON_STYLE=dark || DC_ICON_STYLE=classic
+      fi
     fi
   else
     say "   ${_d}App Desktop non trovata in $DC_APP_SRC: salto la seconda app.${_r}" "   ${_d}Desktop app not found in $DC_APP_SRC: skipping the second app.${_r}"
@@ -975,7 +1002,7 @@ cmd_plan() {
     if any_badge; then
       local -a where=(); badge_on a && where+=("$(badge_text a) $(L "sul launcher di" "on the launcher of") $DC_A_LABEL")
       badge_on b && where+=("$(badge_text b) $(L "sul launcher e sulla copia di" "on the launcher and copy of") $DC_B_LABEL")
-      say "  $(L "Etichette: " "Labels:    ")${(j:; :)where}"
+      say "  $(L "Etichette: " "Labels:    ")${(j:; :)where} ($(L "icona" "icon") $([[ $DC_ICON_STYLE == dark ]] && L scura dark || L classica classic))"
     fi
     if [[ -d $DC_B_3P && ! -f $DC_B_3P/.double-claude ]]; then say "  Aggiornamenti: $(tilde $DC_B_3P) esiste già e non è di double-claude, non la tocco" "  Updates:   $(tilde $DC_B_3P) already exists and is not from double-claude, leaving it alone"
     else say "  Aggiornamenti: bloccati per la copia con una policy in $(tilde $DC_B_3P)" "  Updates:   blocked for the copy with a policy in $(tilde $DC_B_3P)"; fi
