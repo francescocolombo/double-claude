@@ -256,7 +256,7 @@ rm "$LB/Contents/Resources/double-claude"; print -r -- 'do shell script "x > /de
 out=$($CS doctor)
 check "doctor: launcher fatto a mano che lavora in background" "[[ \$out == *'non è di double-claude'* && \$out == *'in background'* ]]"
 
-sed -i.bak 's/^DC_ICON_LABELS=0/DC_ICON_LABELS=1/' $H/.config/double-claude/config
+sed -i.bak 's/^DC_ICON_LABELS=.*/DC_ICON_LABELS=both/' $H/.config/double-claude/config
 out=$($CS --yes apply app)
 check "etichette: annunciate da apply" "[[ \$out == *'etichette sulle icone: Work, Personal'* ]]"
 check "etichette: icona del launcher nuova e valida" "! cmp -s '$SRC/Contents/Resources/electron.icns' '$LB/Contents/Resources/applet.icns' && sips -g pixelWidth '$LB/Contents/Resources/applet.icns' >/dev/null 2>&1"
@@ -265,9 +265,17 @@ out=$($CS doctor)
 check "doctor: etichetta sulla copia" "[[ \$out == *'etichetta Personal sull'* ]]"
 rm -rf "$CL"; FAKE_DIALOG=Riapri $CS open b >/dev/null
 check "copia rifatta al clic: l'etichetta torna" "[[ -f '$CL/Contents/Info.plist' && -f '$CL/Icon'$'\\r' ]]"
-sed -i.bak 's/^DC_ICON_LABELS=1/DC_ICON_LABELS=0/' $H/.config/double-claude/config
+sed -i.bak 's/^DC_ICON_LABELS=.*/DC_ICON_LABELS=a/' $H/.config/double-claude/config
 $CS --yes apply app >/dev/null
-check "etichette spente: tolte da copia e launcher" "[[ ! -f '$CL/Icon'$'\\r' ]] && cmp -s '$SRC/Contents/Resources/electron.icns' '$LB/Contents/Resources/applet.icns'"
+check "etichetta solo su A: via da copia e launcher di B, resta sul launcher di A" "[[ ! -f '$CL/Icon'$'\\r' ]] && cmp -s '$SRC/Contents/Resources/electron.icns' '$LB/Contents/Resources/applet.icns' && ! cmp -s '$SRC/Contents/Resources/electron.icns' '$LA/Contents/Resources/applet.icns'"
+check "copia senza segno di icona personalizzata" "! xattr -p com.apple.FinderInfo '$CL' 2>/dev/null | grep -q '04 00'"
+xattr -wx com.apple.FinderInfo 0000000000000000040000000000000000000000000000000000000000000000 "$CL"
+out=$($CS doctor)
+check "doctor: icona rotta (segno senza file) riconosciuta" "[[ \$out == *'il Dock mostra una cartella'* ]]"
+sed -i.bak 's/^DC_ICON_LABELS=.*/DC_ICON_LABELS=none/' $H/.config/double-claude/config
+$CS --yes apply app >/dev/null
+out=$($CS doctor)
+check "apply app ripara l'icona rotta anche senza etichette" "[[ \$out != *'il Dock mostra una cartella'* ]] && ! xattr -p com.apple.FinderInfo '$CL' 2>/dev/null | grep -q '04 00'"
 fi
 
 # ---------------------------------------------------------------- scenario 5: lingua

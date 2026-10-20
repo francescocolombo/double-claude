@@ -80,7 +80,8 @@ I divieti valgono per gli strumenti file di Claude Code e per i comandi che nomi
 - Al clic sul launcher, la copia si rifà solo se è più vecchia di Claude.app. Se è più recente o la versione non si legge, resta. La copia nuova nasce accanto e prende il posto della vecchia solo quando è completa.
 - Il launcher aspetta che il lavoro sia finito: da macOS 27 i processi avviati da un'app che si chiude vengono interrotti.
 - Ogni launcher ha un identificativo suo e l'icona di Claude. `init` chiede se tenerli fuori dal Dock (si aprono da Spotlight) oppure no (si possono fissare nel Dock).
-- **Etichette sulle icone (facoltative).** `init` può aggiungere sull'icona una pillola col nome del profilo, per esempio "Work" e "Personal": sui due launcher e sulla copia, che è quella che si vede nel Dock. Quando la copia viene rifatta dopo un aggiornamento, l'etichetta torna da sola. Il testo si cambia con `DC_A_BADGE` e `DC_B_BADGE` nella configurazione. L'app Claude originale non viene toccata.
+- **Etichette sulle icone (facoltative).** `init` chiede dove mettere una pillola col nome del profilo: nessuna, solo sul secondo, solo sul primo, su tutti e due. Sul secondo profilo va sul launcher e sulla copia, che è quella che si vede nel Dock; sul primo solo sul launcher, perché l'app Claude originale non viene toccata. Quando la copia viene rifatta dopo un aggiornamento, l'etichetta torna da sola. Il testo si cambia con `DC_A_BADGE` e `DC_B_BADGE` nella configurazione.
+- Per cambiare l'icona della copia, il Terminale deve avere il permesso **Gestione app** (Impostazioni di Sistema → Privacy e sicurezza). Senza, Double Claude lascia l'icona com'era e te lo dice.
 - Se la copia è già aperta senza il suo profilo, il launcher chiede se chiuderla e riaprirla nel modo giusto. `doctor` controlla anche la copia fissata nel Dock e lo stesso account nelle due app.
 
 ## Da dove parti
