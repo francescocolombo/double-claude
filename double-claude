@@ -16,7 +16,7 @@ setopt extended_glob null_glob pipe_fail
 # CLAUDE_CONFIG_DIR ereditata manderebbe a B i comandi pensati per A.
 unset CLAUDE_CONFIG_DIR
 
-DC_VERSION=1.6.0
+DC_VERSION=1.6.1
 DC_HOME_CFG=${DC_CONFIG_HOME:-$HOME/.config/double-claude}
 DC_CONF=$DC_HOME_CFG/config
 SELF=${0:A}
@@ -502,14 +502,18 @@ clone_recover() { # resti di una ricostruzione interrotta
   return 0
 }
 CLONE_DID=''
-build_clone() { # la copia nuova nasce accanto e prende il posto della vecchia solo quando è completa
+build_clone() { # build_clone [force]: la copia nuova nasce accanto e prende il posto della vecchia solo quando è completa
   clone_recover
   CLONE_DID=$(clone_state)
-  [[ $CLONE_DID == (missing|behind) ]] || return 0
+  if [[ $CLONE_DID != (missing|behind) ]]; then
+    [[ ${1:-} == force ]] || return 0
+    CLONE_DID=redressed   # stessa versione, rifatta per cambiarle l'icona
+  fi
   local R=$DC_CLONE.refreshing P=$DC_CLONE.previous
   mkdir -p "${DC_CLONE:h}"
   cp -cR "$DC_APP_SRC" "$R" 2>/dev/null || { rm -rf "$R"; cp -R "$DC_APP_SRC" "$R"; } || { rm -rf "$R"; return 1; }
   [[ -f $R/Contents/Info.plist ]] || { rm -rf "$R"; return 1; }
+  dress_clone "$R"   # l'etichetta va messa ora: dopo la prima apertura macOS non lascia più modificare l'app
   if [[ -d $DC_CLONE ]]; then mv "$DC_CLONE" "$P" || { rm -rf "$R"; return 1; }; fi
   if ! mv "$R" "$DC_CLONE"; then [[ -d $P ]] && mv "$P" "$DC_CLONE"; return 1; fi
   rm -rf "$P"
@@ -532,8 +536,7 @@ open_b() {
     fi
     quit_pids $bad || { dialog "$(L "$DC_B_APP non si chiude. Chiudila con ⌘Q, poi riaprila da qui." "$DC_B_APP won't quit. Quit it with ⌘Q, then reopen it from here.")" "OK"; return 1; }
   fi
-  build_clone || return 1
-  [[ $CLONE_DID == (missing|behind) ]] && clone_icon   # la copia nuova non ha l'etichetta: si rimette
+  if icon_stale; then build_clone force || return 1; else build_clone || return 1; fi   # etichetta cambiata o icona rotta: copia nuova
   [[ -d $DC_B_3P ]] || block_updates >/dev/null
   open -n -a "$DC_CLONE" --env CLAUDE_CONFIG_DIR="$DC_B_CFG" --args "--user-data-dir=$DC_B_DATA"
 }
@@ -544,7 +547,6 @@ icon_broken() { # la cartella ha il segno "icona personalizzata" ma non il file 
   local h; h=$(xattr -px com.apple.FinderInfo "$1" 2>/dev/null | tr -d ' \n')
   [[ -n $h && ! -e "$1/Icon"$'\r' ]] && (( 16#${h[17,18]:-00} & 4 ))
 }
-clear_icon() { set_custom_icon "$1"; icon_broken "$1" && xattr -d com.apple.FinderInfo "$1" 2>/dev/null; return 0; }
 badge_text() { if [[ $1 == a ]]; then print -r -- "${DC_A_BADGE:-${(C)DC_A_LABEL}}"; else print -r -- "${DC_B_BADGE:-${(C)DC_B_LABEL}}"; fi; }
 badge_js() { cat <<'JS'
 ObjC.import('AppKit');
@@ -610,18 +612,23 @@ make_badged_icns() { # make_badged_icns ICNS_DI_PARTENZA ETICHETTA ICNS_NUOVO [A
 set_custom_icon() { # set_custom_icon PERCORSO [ICNS]: icona personalizzata come dal Finder (la firma dell'app resta valida); senza ICNS la toglie
   [[ $(osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(a) { var img = a[1] ? $.NSImage.alloc.initWithContentsOfFile(a[1]) : $(); return $.NSWorkspace.sharedWorkspace.setIconForFileOptions(img, a[0], 0) ? "ok" : "no"; }' "$1" "${2:-}" 2>/dev/null) == ok ]]
 }
-clone_icon() { # mette (o toglie) l'etichetta sull'icona della copia: è quella che si vede nel Dock
-  # ritorna 1 se non riesce a disegnarla, 2 se macOS blocca la modifica (Gestione app)
-  local mark=$DC_HOME_CFG/icons/clone-label out=$DC_HOME_CFG/icons/b.icns
-  if badge_on b; then
-    local -a icns=("$DC_CLONE"/Contents/Resources/*.icns(N))
-    mkdir -p "${out:h}"
-    (( $#icns )) && make_badged_icns "$icns[1]" "$(badge_text b)" "$out" "$DC_CLONE" || return 1
-    set_custom_icon "$DC_CLONE" "$out"
-    if [[ ! -e "$DC_CLONE/Icon"$'\r' ]]; then clear_icon "$DC_CLONE"; return 2; fi   # mai lasciare l'icona a metà
-    touch "$mark"
-  elif [[ -f $mark ]] || icon_broken "$DC_CLONE"; then   # toglie la sua etichetta, o un'icona rimasta a metà
-    clear_icon "$DC_CLONE"; rm -f "$mark"
+# L'etichetta della copia: macOS (Gestione app) non lascia modificare un'app già aperta, ma una copia appena fatta sì.
+# Per questo l'icona si mette solo sulla copia nuova, in build_clone; per cambiarla la copia si rifà (copia APFS, istantanea).
+ICON_MARK() { print -r -- "$DC_HOME_CFG/icons/clone-label"; }
+icon_want() { badge_on b && print -r -- "$(badge_text b)|$DC_ICON_STYLE"; return 0; }
+icon_have() { [[ -e "$DC_CLONE/Icon"$'\r' ]] && cat "$(ICON_MARK)" 2>/dev/null; return 0; }
+icon_stale() { [[ -d $DC_CLONE ]] && { [[ $(icon_want) != $(icon_have) ]] || icon_broken "$DC_CLONE"; }; }
+b_running() { [[ -n $(mains "$DC_CLONE") ]]; }
+DRESS=''   # esito dell'ultima vestizione: ok | plain | failed
+dress_clone() { # dress_clone COPIA_NUOVA
+  local mark; mark=$(ICON_MARK); rm -f "$mark"; DRESS=plain
+  badge_on b || return 0
+  local out=$DC_HOME_CFG/icons/b.icns; local -a icns=("$1"/Contents/Resources/*.icns(N))
+  mkdir -p "${mark:h}"
+  if (( $#icns )) && make_badged_icns "$icns[1]" "$(badge_text b)" "$out" "$1" && set_custom_icon "$1" "$out" && [[ -e "$1/Icon"$'\r' ]]; then
+    icon_want > "$mark"; DRESS=ok
+  else
+    set_custom_icon "$1" 2>/dev/null; DRESS=failed   # mai un'icona a metà
   fi
   return 0
 }
@@ -953,9 +960,10 @@ cmd_doctor() {
         hint "double-claude apply app lo sostituisce (il vecchio va nel backup)" "double-claude apply app replaces it (the old one goes into the backup)"
       fi
       [[ -d $DC_B_DATA ]] && ok "$DC_B_APP ha i suoi dati" "$DC_B_APP has its own data" || { warn "$DC_B_APP non è mai stata aperta" "$DC_B_APP has never been opened"; hint "aprila da Spotlight e fai il login con l'account $DC_B_LABEL" "open it from Spotlight and sign in with the $DC_B_LABEL account"; }
-      if icon_broken "$DC_CLONE"; then ko "l'icona di $DC_B_APP è rotta: il Dock mostra una cartella" "the $DC_B_APP icon is broken: the Dock shows a folder"; hint "double-claude apply app"
+      if icon_broken "$DC_CLONE"; then ko "l'icona di $DC_B_APP è rotta: il Dock mostra una cartella" "the $DC_B_APP icon is broken: the Dock shows a folder"; hint "chiudi $DC_B_APP e riaprila dal launcher: la copia si rifà con l'icona giusta" "quit $DC_B_APP and reopen it from the launcher: the copy is rebuilt with the right icon"
       elif badge_on b; then
-        [[ -e "$DC_CLONE/Icon"$'\r' ]] && ok "etichetta $(badge_text b) sull'icona di $DC_B_APP" "$(badge_text b) label on the $DC_B_APP icon" || { warn "la copia di $DC_B_APP non ha l'etichetta" "the $DC_B_APP copy has no label"; hint "double-claude apply app"; }
+        if ! icon_stale; then ok "etichetta $(badge_text b) sull'icona di $DC_B_APP" "$(badge_text b) label on the $DC_B_APP icon"
+        else warn "l'icona di $DC_B_APP non ha ancora l'etichetta scelta" "the $DC_B_APP icon doesn't have the chosen label yet"; hint "chiudi $DC_B_APP e riaprila dal launcher" "quit $DC_B_APP and reopen it from the launcher"; fi
       fi
     fi
     say "    ${_d}Controllo a mano: nella scheda Code di $DC_B_APP scrivi «esegui echo \$CLAUDE_CONFIG_DIR».${_r}" "    ${_d}Manual check: in the Code tab of $DC_B_APP type «run echo \$CLAUDE_CONFIG_DIR».${_r}"
@@ -1106,16 +1114,17 @@ apply_app() {
   esac
   mk_launcher "$DC_A_APP" a && ok "launcher ~/Applications/$DC_A_APP.app" "launcher ~/Applications/$DC_A_APP.app"
   mk_launcher "$DC_B_APP" b && ok "launcher ~/Applications/$DC_B_APP.app ${_d}(passa CLAUDE_CONFIG_DIR)${_r}" "launcher ~/Applications/$DC_B_APP.app ${_d}(passes CLAUDE_CONFIG_DIR)${_r}"
-  local ci=0; clone_icon || ci=$?
+  if icon_stale; then
+    if b_running; then
+      warn "$DC_B_APP è aperta: la sua icona cambia alla prossima apertura dal launcher" "$DC_B_APP is open: its icon changes the next time you open it from the launcher"
+      hint "chiudila con ⌘Q e riaprila dal launcher $DC_B_APP" "quit it with ⌘Q and reopen it from the $DC_B_APP launcher"
+    elif build_clone force; then
+      case $DRESS in failed) warn "non riesco a disegnare l'etichetta di $DC_B_APP: resta l'icona di Claude" "can't draw the $DC_B_APP label: it keeps Claude's icon";; esac
+    fi
+  fi
   if any_badge; then
     local -a lab=(); badge_on a && lab+=("$(badge_text a)"); badge_on b && lab+=("$(badge_text b)")
-    case $ci in
-      0) ok "etichette sulle icone: ${(j:, :)lab}" "icon labels: ${(j:, :)lab}"
-         badge_on b && hint "se il Dock mostra ancora l'icona vecchia, chiudi e riapri $DC_B_APP" "if the Dock still shows the old icon, quit and reopen $DC_B_APP";;
-      2) warn "macOS non lascia cambiare l'icona di $DC_B_APP da qui: la lascio com'era" "macOS won't let me change the $DC_B_APP icon from here: leaving it as it was"
-         hint "Impostazioni di Sistema → Privacy e sicurezza → Gestione app: attiva il Terminale, poi rilancia double-claude apply app" "System Settings → Privacy & Security → App Management: turn on Terminal, then run double-claude apply app again";;
-      *) warn "non riesco a disegnare l'etichetta di $DC_B_APP" "can't draw the $DC_B_APP label";;
-    esac
+    ok "etichette sulle icone: ${(j:, :)lab}" "icon labels: ${(j:, :)lab}"
   fi
   (( DC_LAUNCHER_HIDE )) && hint "i launcher restano fuori dal Dock: aprili da Spotlight" "launchers stay out of the Dock: open them from Spotlight" || hint "per il Dock fissa i launcher, non le app aperte" "for the Dock, pin the launchers, not the open apps"
   say "  Primo avvio:" "  First launch:"

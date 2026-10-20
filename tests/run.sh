@@ -257,6 +257,10 @@ out=$($CS doctor)
 check "doctor: launcher fatto a mano che lavora in background" "[[ \$out == *'non è di double-claude'* && \$out == *'in background'* ]]"
 
 sed -i.bak 's/^DC_ICON_LABELS=.*/DC_ICON_LABELS=both/' $H/.config/double-claude/config
+print -r -- "4242 $CL/Contents/MacOS/Claude --user-data-dir=$D" > $LOGS/ps.txt
+out=$($CS --yes apply app)
+check "copia aperta: l'icona cambia alla prossima apertura, la copia non si tocca" "[[ \$out == *'la sua icona cambia alla prossima apertura'* && ! -e '$CL/Icon'$'\\r' ]]"
+: > $LOGS/ps.txt   # da qui la copia è chiusa
 out=$($CS --yes apply app)
 check "etichette: annunciate da apply" "[[ \$out == *'etichette sulle icone: Work, Personal'* ]]"
 check "etichette: icona del launcher nuova e valida" "! cmp -s '$SRC/Contents/Resources/electron.icns' '$LB/Contents/Resources/applet.icns' && sips -g pixelWidth '$LB/Contents/Resources/applet.icns' >/dev/null 2>&1"
@@ -268,6 +272,7 @@ check "stile scuro senza simbolo nell'app: resta la classica, senza errori" "[[ 
 plan=$($CS plan)
 check "plan: stile dell'icona" "[[ \$plan == *'icona scura'* ]]"
 sed -i.bak '/^DC_ICON_STYLE=dark$/d' $H/.config/double-claude/config
+$CS --yes apply app >/dev/null
 out=$($CS doctor)
 check "doctor: etichetta sulla copia" "[[ \$out == *'etichetta Personal sull'* ]]"
 rm -rf "$CL"; FAKE_DIALOG=Riapri $CS open b >/dev/null
