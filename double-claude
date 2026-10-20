@@ -16,7 +16,7 @@ setopt extended_glob null_glob pipe_fail
 # CLAUDE_CONFIG_DIR ereditata manderebbe a B i comandi pensati per A.
 unset CLAUDE_CONFIG_DIR
 
-DC_VERSION=1.4.0
+DC_VERSION=1.5.0
 DC_HOME_CFG=${DC_CONFIG_HOME:-$HOME/.config/double-claude}
 DC_CONF=$DC_HOME_CFG/config
 SELF=${0:A}
@@ -92,6 +92,8 @@ defaults() {
   DC_LAUNCHER_HIDE=0       # 1 = launcher fuori dal Dock (LSUIElement), ma non si possono fissare
   DC_SANDBOX=0             # 1 = sandbox di Claude Code per i comandi Bash dei due profili
   DC_LANG=                 # en | it; vuoto = lingua del Mac
+  DC_ICON_LABELS=0         # 1 = etichetta col nome del profilo sulle icone dei launcher e della copia
+  DC_A_BADGE= DC_B_BADGE=  # testo delle etichette; vuoto = nome del profilo con l'iniziale maiuscola
   DC_KEEP_BACKUPS=5        # quanti backup tenere
   DC_APP_SRC=${DC_APP:-/Applications/Claude.app}
   unset DC_B_CMD DC_B_APP DC_B_CFG DC_B_DATA DC_CLONE
@@ -144,6 +146,9 @@ save_conf() {
     print -r "DC_LAUNCHER_HIDE=${(q)DC_LAUNCHER_HIDE}       # 1 = launcher fuori dal Dock"
     print -r "DC_SANDBOX=${(q)DC_SANDBOX}             # 1 = sandbox per i comandi Bash dei due profili"
     print -r "DC_LANG=${(q)DC_LANG}                # en | it; vuoto = lingua del Mac"
+    print -r "DC_ICON_LABELS=${(q)DC_ICON_LABELS}         # 1 = etichetta sulle icone"
+    print -r "DC_A_BADGE=${(q)DC_A_BADGE}               # testo dell'etichetta di A; vuoto = $(badge_text a)"
+    print -r "DC_B_BADGE=${(q)DC_B_BADGE}               # testo dell'etichetta di B; vuoto = $(badge_text b)"
   } > "$DC_CONF"
 }
 
@@ -526,8 +531,68 @@ open_b() {
     quit_pids $bad || { dialog "$(L "$DC_B_APP non si chiude. Chiudila con ⌘Q, poi riaprila da qui." "$DC_B_APP won't quit. Quit it with ⌘Q, then reopen it from here.")" "OK"; return 1; }
   fi
   build_clone || return 1
+  [[ $CLONE_DID == (missing|behind) ]] && clone_icon   # la copia nuova non ha l'etichetta: si rimette
   [[ -d $DC_B_3P ]] || block_updates >/dev/null
   open -n -a "$DC_CLONE" --env CLAUDE_CONFIG_DIR="$DC_B_CFG" --args "--user-data-dir=$DC_B_DATA"
+}
+# Etichette sulle icone: una pillola col nome del profilo, disegnata con AppKit e salvata come .icns.
+badge_text() { if [[ $1 == a ]]; then print -r -- "${DC_A_BADGE:-${(C)DC_A_LABEL}}"; else print -r -- "${DC_B_BADGE:-${(C)DC_B_LABEL}}"; fi; }
+badge_js() { cat <<'JS'
+ObjC.import('AppKit');
+function run(a) {
+  var src = a[0], label = a[1], out = a[2], S = 1024;
+  var base = $.NSImage.alloc.initWithContentsOfFile(src);
+  if (!base || base.isNil() || !base.isValid) return 'error';
+  var rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(null, S, S, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
+  var ctx = $.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep);
+  $.NSGraphicsContext.saveGraphicsState; $.NSGraphicsContext.setCurrentContext(ctx);
+  base.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, S, S), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
+  var fs = 120, font, attrs, size, str = $(label);
+  do {
+    font = $.NSFont.systemFontOfSizeWeight(fs, $.NSFontWeightBold);
+    attrs = $.NSMutableDictionary.alloc.init;
+    attrs.setObjectForKey(font, $.NSFontAttributeName);
+    attrs.setObjectForKey($.NSColor.whiteColor, $.NSForegroundColorAttributeName);
+    size = str.sizeWithAttributes(attrs); fs -= 6;
+  } while (size.width > S * 0.62 && fs > 40);
+  var padX = size.height * 0.55, padY = size.height * 0.12;
+  var w = size.width + 2 * padX, h = size.height + 2 * padY, x = (S - w) / 2, y = S * 0.145;
+  var pill = $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius($.NSMakeRect(x, y, w, h), h / 2, h / 2);
+  $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.07, 0.08, 0.10, 0.92).setFill; pill.fill;
+  $.NSColor.colorWithSRGBRedGreenBlueAlpha(1, 1, 1, 0.9).setStroke; pill.setLineWidth(10); pill.stroke;
+  str.drawAtPointWithAttributes($.NSMakePoint(x + padX, y + padY), attrs);
+  $.NSGraphicsContext.restoreGraphicsState;
+  rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $.NSDictionary.dictionary).writeToFileAtomically(out, true);
+  return 'ok';
+}
+JS
+}
+make_badged_icns() { # make_badged_icns ICNS_DI_PARTENZA ETICHETTA ICNS_NUOVO
+  local t s; t=$(mktemp -d) || return 1
+  badge_js > $t/badge.js
+  if [[ $(osascript -l JavaScript $t/badge.js "$1" "$2" $t/b.png 2>/dev/null) != ok ]]; then rm -rf $t; return 1; fi
+  mkdir $t/icon.iconset
+  for s in 16 32 128 256 512; do
+    sips -z $s $s $t/b.png --out $t/icon.iconset/icon_${s}x${s}.png >/dev/null 2>&1
+    sips -z $((s * 2)) $((s * 2)) $t/b.png --out $t/icon.iconset/icon_${s}x${s}@2x.png >/dev/null 2>&1
+  done
+  iconutil -c icns $t/icon.iconset -o "$3" 2>/dev/null; local r=$?
+  rm -rf $t; return $r
+}
+set_custom_icon() { # set_custom_icon PERCORSO [ICNS]: icona personalizzata come dal Finder (la firma dell'app resta valida); senza ICNS la toglie
+  [[ $(osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(a) { var img = a[1] ? $.NSImage.alloc.initWithContentsOfFile(a[1]) : $(); return $.NSWorkspace.sharedWorkspace.setIconForFileOptions(img, a[0], 0) ? "ok" : "no"; }' "$1" "${2:-}" 2>/dev/null) == ok ]]
+}
+clone_icon() { # mette (o toglie) l'etichetta sull'icona della copia: è quella che si vede nel Dock
+  local mark=$DC_HOME_CFG/icons/clone-label out=$DC_HOME_CFG/icons/b.icns
+  if (( DC_ICON_LABELS )); then
+    local -a icns=("$DC_CLONE"/Contents/Resources/*.icns(N))
+    mkdir -p "${out:h}"
+    (( $#icns )) && make_badged_icns "$icns[1]" "$(badge_text b)" "$out" && set_custom_icon "$DC_CLONE" "$out" || return 1
+    touch "$mark"
+  elif [[ -f $mark ]]; then
+    set_custom_icon "$DC_CLONE" && rm -f "$mark"
+  fi
+  return 0
 }
 mk_launcher() { # mk_launcher "Nome app" a|b
   local L="$HOME/Applications/$1.app" lbl icns
@@ -539,7 +604,10 @@ mk_launcher() { # mk_launcher "Nome app" a|b
   plutil -replace CFBundleIdentifier -string "local.double-claude.$lbl" "$L/Contents/Info.plist"
   (( DC_LAUNCHER_HIDE )) && plutil -replace LSUIElement -bool true "$L/Contents/Info.plist"
   icns=($DC_APP_SRC/Contents/Resources/*.icns(N))   # il nome dell'icona cambia tra le versioni
-  if (( $#icns )); then cp "$icns[1]" "$L/Contents/Resources/applet.icns"; rm -f "$L/Contents/Resources/Assets.car"; fi
+  if (( $#icns )); then
+    (( DC_ICON_LABELS )) && make_badged_icns "$icns[1]" "$(badge_text $2)" "$L/Contents/Resources/applet.icns" || cp "$icns[1]" "$L/Contents/Resources/applet.icns"
+    rm -f "$L/Contents/Resources/Assets.car"
+  fi
   print -r -- "$2 $DC_VERSION" > "$L/Contents/Resources/double-claude"   # segno di riconoscimento per doctor
   codesign -f -s - "$L" >/dev/null 2>&1
   lsreg "$L"
@@ -717,6 +785,7 @@ cmd_init() {
       DC_MODULES+=(app)
       say "   ${_d}I launcher possono stare nel Dock (e si possono fissare) oppure restarne fuori (si aprono da Spotlight).${_r}" "   ${_d}Launchers can live in the Dock (and be pinned) or stay out of it (open them from Spotlight).${_r}"
       if confirm "$(L "Tengo i launcher fuori dal Dock?" "Keep the launchers out of the Dock?")" $( (( DC_LAUNCHER_HIDE )) && print S || print N); then DC_LAUNCHER_HIDE=1; else DC_LAUNCHER_HIDE=0; fi
+      if confirm "$(L "Aggiungo un'etichetta sulle icone ($(badge_text a), $(badge_text b))?" "Add a label to the icons ($(badge_text a), $(badge_text b))?")" $( (( DC_ICON_LABELS )) && print S || print N); then DC_ICON_LABELS=1; else DC_ICON_LABELS=0; fi
     fi
   else
     say "   ${_d}App Desktop non trovata in $DC_APP_SRC: salto la seconda app.${_r}" "   ${_d}Desktop app not found in $DC_APP_SRC: skipping the second app.${_r}"
@@ -843,6 +912,9 @@ cmd_doctor() {
         hint "double-claude apply app lo sostituisce (il vecchio va nel backup)" "double-claude apply app replaces it (the old one goes into the backup)"
       fi
       [[ -d $DC_B_DATA ]] && ok "$DC_B_APP ha i suoi dati" "$DC_B_APP has its own data" || { warn "$DC_B_APP non è mai stata aperta" "$DC_B_APP has never been opened"; hint "aprila da Spotlight e fai il login con l'account $DC_B_LABEL" "open it from Spotlight and sign in with the $DC_B_LABEL account"; }
+      if (( DC_ICON_LABELS )); then
+        [[ -f "$DC_CLONE/Icon"$'\r' ]] && ok "etichetta $(badge_text b) sull'icona di $DC_B_APP" "$(badge_text b) label on the $DC_B_APP icon" || { warn "la copia di $DC_B_APP non ha l'etichetta" "the $DC_B_APP copy has no label"; hint "double-claude apply app"; }
+      fi
     fi
     say "    ${_d}Controllo a mano: nella scheda Code di $DC_B_APP scrivi «esegui echo \$CLAUDE_CONFIG_DIR».${_r}" "    ${_d}Manual check: in the Code tab of $DC_B_APP type «run echo \$CLAUDE_CONFIG_DIR».${_r}"
     say "    ${_d}Deve rispondere $DC_B_CFG.${_r}" "    ${_d}It must answer $DC_B_CFG.${_r}"
@@ -885,6 +957,7 @@ cmd_plan() {
     say "  Copia:     $(tilde $DC_CLONE)" "  Copy:      $(tilde $DC_CLONE)"
     say "  Dati:      $(tilde $DC_B_DATA)" "  Data:      $(tilde $DC_B_DATA)"
     say "  Launcher:  ~/Applications/$DC_A_APP.app, ~/Applications/$DC_B_APP.app $( (( DC_LAUNCHER_HIDE )) && print '(fuori dal Dock)' || print '(si possono fissare nel Dock)')" "  Launchers: ~/Applications/$DC_A_APP.app, ~/Applications/$DC_B_APP.app $( (( DC_LAUNCHER_HIDE )) && print '(out of the Dock)' || print '(can be pinned in the Dock)')"
+    (( DC_ICON_LABELS )) && say "  Etichette: $(badge_text a) sul launcher di $DC_A_LABEL; $(badge_text b) sul launcher e sulla copia di $DC_B_LABEL" "  Labels:    $(badge_text a) on the $DC_A_LABEL launcher; $(badge_text b) on the $DC_B_LABEL launcher and copy"
     if [[ -d $DC_B_3P && ! -f $DC_B_3P/.double-claude ]]; then say "  Aggiornamenti: $(tilde $DC_B_3P) esiste già e non è di double-claude, non la tocco" "  Updates:   $(tilde $DC_B_3P) already exists and is not from double-claude, leaving it alone"
     else say "  Aggiornamenti: bloccati per la copia con una policy in $(tilde $DC_B_3P)" "  Updates:   blocked for the copy with a policy in $(tilde $DC_B_3P)"; fi
   fi
@@ -987,6 +1060,10 @@ apply_app() {
   esac
   mk_launcher "$DC_A_APP" a && ok "launcher ~/Applications/$DC_A_APP.app" "launcher ~/Applications/$DC_A_APP.app"
   mk_launcher "$DC_B_APP" b && ok "launcher ~/Applications/$DC_B_APP.app ${_d}(passa CLAUDE_CONFIG_DIR)${_r}" "launcher ~/Applications/$DC_B_APP.app ${_d}(passes CLAUDE_CONFIG_DIR)${_r}"
+  if (( DC_ICON_LABELS )); then
+    if clone_icon; then ok "etichette sulle icone: $(badge_text a), $(badge_text b)" "icon labels: $(badge_text a), $(badge_text b)"; hint "se il Dock mostra ancora l'icona vecchia, chiudi e riapri $DC_B_APP" "if the Dock still shows the old icon, quit and reopen $DC_B_APP"
+    else warn "non riesco a disegnare le etichette: le icone restano quelle di Claude" "can't draw the labels: icons stay as Claude's"; fi
+  else clone_icon; fi
   (( DC_LAUNCHER_HIDE )) && hint "i launcher restano fuori dal Dock: aprili da Spotlight" "launchers stay out of the Dock: open them from Spotlight" || hint "per il Dock fissa i launcher, non le app aperte" "for the Dock, pin the launchers, not the open apps"
   say "  Primo avvio:" "  First launch:"
   say "    1. chiudi Claude con ⌘Q e nel browser esci da claude.ai" "    1. quit Claude with ⌘Q and sign out of claude.ai in the browser"

@@ -80,6 +80,7 @@ Deny rules apply to Claude Code's file tools and to commands that name a file, l
 - When you click the launcher, the copy is rebuilt only if it's older than Claude.app. If it's newer, or its version can't be read, it stays. The new copy is built next to the old one and replaces it only when it's complete.
 - The launcher waits for the work to finish: since macOS 27, processes started by an app that quits are stopped.
 - Each launcher has its own identifier and Claude's icon. `init` asks whether to keep them out of the Dock (open them from Spotlight) or not (they can be pinned to the Dock).
+- **Icon labels (optional).** `init` can add a pill with the profile name to the icon, for example "Work" and "Personal": on both launchers and on the copy, which is the one you see in the Dock. When the copy is rebuilt after an update, the label comes back on its own. Change the text with `DC_A_BADGE` and `DC_B_BADGE` in the configuration. The original Claude app is never touched.
 - If the copy is already open without its profile, the launcher asks whether to quit it and reopen it the right way. `doctor` also checks for the copy pinned in the Dock and for the same account in both apps.
 
 ## Where you start from

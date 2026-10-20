@@ -165,7 +165,7 @@ export HOME=$T/kim; H=$HOME; mkdir -p $H; cd $H
 M=$T/mac; mkdir -p $M
 mkplist() { print -r -- "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>$1</string><key>CFBundleShortVersionString</key><string>$2</string></dict></plist>" > $3; }
 SRC=$T/apps/Claude.app; mkdir -p $SRC/Contents/{MacOS,Resources}; mkplist com.anthropic.claudefordesktop 2.9.1 $SRC/Contents/Info.plist
-print icona > $SRC/Contents/Resources/electron.icns; print bin > $SRC/Contents/MacOS/Claude
+cp /System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns $SRC/Contents/Resources/electron.icns; print bin > $SRC/Contents/MacOS/Claude
 cat > $M/osacompile <<'EOF'
 #!/bin/zsh
 while (( $# )); do case $1 in -o) o=$2; shift 2;; -e) e=$2; shift 2;; *) shift;; esac; done
@@ -255,6 +255,19 @@ check "doctor: launcher della 1.0" "[[ \$out == *'versione 1.0'* ]]"
 rm "$LB/Contents/Resources/double-claude"; print -r -- 'do shell script "x > /dev/null 2>&1 &"' > "$LB/Contents/Resources/Scripts/main.scpt"
 out=$($CS doctor)
 check "doctor: launcher fatto a mano che lavora in background" "[[ \$out == *'non è di double-claude'* && \$out == *'in background'* ]]"
+
+sed -i.bak 's/^DC_ICON_LABELS=0/DC_ICON_LABELS=1/' $H/.config/double-claude/config
+out=$($CS --yes apply app)
+check "etichette: annunciate da apply" "[[ \$out == *'etichette sulle icone: Work, Personal'* ]]"
+check "etichette: icona del launcher nuova e valida" "! cmp -s '$SRC/Contents/Resources/electron.icns' '$LB/Contents/Resources/applet.icns' && sips -g pixelWidth '$LB/Contents/Resources/applet.icns' >/dev/null 2>&1"
+check "etichette: icona personalizzata sulla copia" "[[ -f '$CL/Icon'$'\\r' ]]"
+out=$($CS doctor)
+check "doctor: etichetta sulla copia" "[[ \$out == *'etichetta Personal sull'* ]]"
+rm -rf "$CL"; FAKE_DIALOG=Riapri $CS open b >/dev/null
+check "copia rifatta al clic: l'etichetta torna" "[[ -f '$CL/Contents/Info.plist' && -f '$CL/Icon'$'\\r' ]]"
+sed -i.bak 's/^DC_ICON_LABELS=1/DC_ICON_LABELS=0/' $H/.config/double-claude/config
+$CS --yes apply app >/dev/null
+check "etichette spente: tolte da copia e launcher" "[[ ! -f '$CL/Icon'$'\\r' ]] && cmp -s '$SRC/Contents/Resources/electron.icns' '$LB/Contents/Resources/applet.icns'"
 fi
 
 # ---------------------------------------------------------------- scenario 5: lingua
